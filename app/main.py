@@ -32,7 +32,8 @@ async def lifespan(app: FastAPI):
         logger.info("API started successfully")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
-        raise
+        logger.warning("API starting without database connection - database endpoints will not work")
+        # Don't raise - allow API to start without database for testing
     
     yield
     

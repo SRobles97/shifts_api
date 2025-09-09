@@ -8,6 +8,7 @@ __pycache__/
 *.pyd
 *.pdb
 .venv/
+logs/
 
 # Distribución / paquetes
 build/
@@ -51,6 +52,7 @@ db/migrations/versions/*.pyc
 *.code-workspace
 CLAUDE.md
 claude/
+.claude/
 
 # PyCharm / IntelliJ
 .idea/
