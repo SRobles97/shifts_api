@@ -7,6 +7,7 @@ database connections, and routing configuration.
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.core.logging import setup_logging
@@ -52,6 +53,15 @@ app = FastAPI(
     description="API for managing work schedules and shifts for devices",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
 )
 
 # Add logging middleware
