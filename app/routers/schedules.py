@@ -3,7 +3,7 @@ from typing import List, Optional
 import asyncpg
 import json
 import os
-from datetime import datetime
+from datetime import datetime, time
 
 from ..schemas.schedule import (
     ScheduleCreateRequest,
@@ -25,6 +25,11 @@ from ..models.schedule import (
 from ..repositories.crud import schedule_crud
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
+
+
+def parse_time_string(time_str: str) -> time:
+    """Convert HH:MM string to Python time object"""
+    return datetime.strptime(time_str, "%H:%M").time()
 
 
 async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
@@ -67,12 +72,23 @@ async def create_or_update_schedule(
         schedule_data = {
             "device_name": schedule_request.device_name,
             "active_days": schedule_request.schedule.active_days,
-            "work_start_time": schedule_request.schedule.work_hours.start,
-            "work_end_time": schedule_request.schedule.work_hours.end,
-            "break_start_time": schedule_request.schedule.break_time.start,
+            "work_start_time": parse_time_string(
+                schedule_request.schedule.work_hours.start
+            ),
+            "work_end_time": parse_time_string(
+                schedule_request.schedule.work_hours.end
+            ),
+            "break_start_time": parse_time_string(
+                schedule_request.schedule.break_time.start
+            ),
             "break_duration": schedule_request.schedule.break_time.duration_minutes,
             "extra_hours": (
-                schedule_request.extra_hours.dict()
+                json.dumps(
+                    {
+                        day: [hour.model_dump() for hour in hours]
+                        for day, hours in schedule_request.extra_hours.items()
+                    }
+                )
                 if schedule_request.extra_hours
                 else None
             ),
