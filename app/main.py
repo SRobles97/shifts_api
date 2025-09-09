@@ -71,7 +71,7 @@ app.add_middleware(LoggingMiddleware)
 app.include_router(schedules_router, prefix="/shifts-api/v1")
 
 
-@app.get("/")
+@app.get("/shifts-api")
 async def root():
     """Health check endpoint."""
     logger.info("Health check endpoint accessed")
@@ -82,7 +82,7 @@ async def root():
     }
 
 
-@app.get("/health")
+@app.get("/shifts-api/health")
 async def health_check():
     """Detailed health check endpoint."""
     logger.info("Health check endpoint accessed")
