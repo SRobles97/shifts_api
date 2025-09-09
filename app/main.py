@@ -68,7 +68,7 @@ app.add_middleware(
 app.add_middleware(LoggingMiddleware)
 
 # Include routers
-app.include_router(schedules_router, prefix="/api/v1")
+app.include_router(schedules_router, prefix="/shifts-api/v1")
 
 
 @app.get("/")
