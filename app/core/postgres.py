@@ -19,9 +19,11 @@ async def init_db():
     Realiza las siguientes operaciones:
     1. Establece el pool de conexiones a PostgreSQL
     2. Intenta habilitar TimescaleDB (si está disponible)
-    3. Crea las tablas necesarias con esquemas optimizados
-    4. Configura TimescaleDB con hypertables, políticas de retención y compresión
-    5. Crea índices optimizados para consultas por dispositivo y tiempo
+    3. Crea la tabla de schedules para configuración de horarios
+    4. Crea índices optimizados para consultas por dispositivo
+    
+    Nota: No se aplican características de TimescaleDB (hypertables, compresión, retención)
+    a la tabla schedules ya que es una tabla de configuración, no de series temporales.
 
     Raises:
         Exception: Si no se puede establecer la conexión o configurar la base de datos
@@ -97,14 +99,12 @@ async def init_db():
 
 async def setup_timescaledb(conn: asyncpg.Connection):
     """
-    Configura TimescaleDB con hypertables, políticas de retención y compresión.
+    Configura optimizaciones de base de datos para PostgreSQL/TimescaleDB.
 
-    TimescaleDB es una extensión de PostgreSQL optimizada para series temporales
-    que proporciona:
-    - Particionado automático por tiempo (hypertables)
-    - Compresión de datos históricos
-    - Políticas de retención automática
-    - Consultas agregadas optimizadas
+    Para la tabla de schedules (configuración de horarios):
+    - Crea índices optimizados para consultas por dispositivo
+    - No aplica características de TimescaleDB (hypertables, compresión, retención)
+      ya que schedules es una tabla de configuración, no de series temporales
 
     Args:
         conn (asyncpg.Connection): Conexión activa a la base de datos
@@ -125,68 +125,10 @@ async def setup_timescaledb(conn: asyncpg.Connection):
 
         logger.info("Configurando TimescaleDB...")
 
-        # Verificar si la tabla de schedules ya es hypertable (particionada por tiempo)
-        schedules_is_hypertable = await conn.fetchval(
-            """
-            SELECT EXISTS (SELECT 1
-                           FROM timescaledb_information.hypertables
-                           WHERE hypertable_name = 'schedules');
-            """
-        )
-
-        # Convertir schedules a hypertable (particionado por mes)
-        if not schedules_is_hypertable:
-            try:
-                await conn.execute(
-                    """
-                    SELECT create_hypertable('schedules', 'created_at', 
-                                           chunk_time_interval => INTERVAL '1 month');
-                    """
-                )
-                logger.info("Hypertable 'schedules' creada correctamente.")
-            except Exception as e:
-                logger.warning(f"Error al crear hypertable schedules: {e}")
-        else:
-            logger.info("schedules ya es una hypertable.")
-
-        # Configurar políticas de retención automática para schedules (retener 2 años)
-        try:
-            await conn.execute(
-                """
-                SELECT add_retention_policy('schedules', INTERVAL '2 years', 
-                                          if_not_exists => TRUE);
-                """
-            )
-            logger.info("Política de retención configurada para schedules (2 años).")
-        except Exception as e:
-            logger.warning(f"Error al configurar política de retención schedules: {e}")
-
-        # Configurar compresión automática para schedules > 30 días (ahorro de espacio)
-        try:
-            # Habilitar compresión en la tabla de schedules
-            await conn.execute(
-                """
-                ALTER TABLE schedules SET (timescaledb.compress);
-                """
-            )
-            # Configurar compresión por dispositivo (mejor ratio de compresión)
-            await conn.execute(
-                """
-                ALTER TABLE schedules SET (timescaledb.compress_segmentby = 'device_name');
-                """
-            )
-            logger.info("Compresión habilitada para schedules.")
-
-            # Política automática: comprimir datos > 30 días
-            await conn.execute(
-                """
-                SELECT add_compression_policy('schedules', INTERVAL '30 days');
-                """
-            )
-            logger.info("Política de compresión añadida para schedules.")
-
-        except Exception as e:
-            logger.warning(f"Error al configurar compresión para schedules: {e}")
+        # Skip TimescaleDB hypertable features for schedules table
+        # The schedules table is a configuration table, not time-series data
+        # It doesn't benefit from hypertable partitioning, compression, or retention policies
+        logger.info("Omitiendo configuración de hypertable para schedules (tabla de configuración, no series temporales).")
 
         # Crear índices optimizados para consultas frecuentes
         try:

@@ -6,7 +6,7 @@ separate from API serialization concerns.
 """
 
 from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, ClassVar
 from datetime import datetime, time, timedelta
 import re
 
@@ -118,7 +118,7 @@ class Schedule(BaseModel):
     for validation and calculations.
     """
     
-    VALID_DAYS = [
+    VALID_DAYS: ClassVar[List[str]] = [
         'monday', 'tuesday', 'wednesday', 'thursday', 
         'friday', 'saturday', 'sunday'
     ]
