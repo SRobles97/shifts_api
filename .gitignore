@@ -1,0 +1,84 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.pdb
+.venv/
+
+# Distribución / paquetes
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+*.env
+
+# =========================
+# FastAPI / Uvicorn / Logs
+# =========================
+*.log
+*.pid
+*.sqlite3
+alembic.ini
+db/migrations/versions/*.pyc
+
+# =========================
+# Archivos de entorno
+# =========================
+.env
+.env.local
+.env.*.local
+.env.test
+.env.prod
+.env.dev
+
+# =========================
+# IDEs
+# =========================
+# VSCode
+.vscode/
+.history/
+*.code-workspace
+CLAUDE.md
+claude/
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+out/
+*.ipr
+*.iws
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+.docker/
+*.pid
+*.seed
+
+# =========================
+# OS específicos
+# =========================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
