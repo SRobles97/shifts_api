@@ -133,6 +133,49 @@ class ScheduleResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ScheduleUpdateRequest(BaseModel):
+    """Schema for updating complete schedule via PUT."""
+
+    # Acepta deviceName y device_name
+    device_name: str = Field(
+        ...,
+        validation_alias=AliasChoices("deviceName", "device_name"),
+        serialization_alias="deviceName",
+        description="Device name",
+    )
+    schedule: ScheduleConfigSchema = Field(
+        ..., description="Basic schedule configuration"
+    )
+    # Acepta extraHours y extra_hours
+    extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
+        None,
+        validation_alias=AliasChoices("extraHours", "extra_hours"),
+        serialization_alias="extraHours",
+        description="Extra hours by day of week",
+    )
+    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SchedulePatchRequest(BaseModel):
+    """Schema for partial schedule updates via PATCH."""
+
+    schedule: Optional[ScheduleConfigSchema] = Field(
+        None, description="Basic schedule configuration"
+    )
+    # Acepta extraHours y extra_hours
+    extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
+        None,
+        validation_alias=AliasChoices("extraHours", "extra_hours"),
+        serialization_alias="extraHours",
+        description="Extra hours by day of week",
+    )
+    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ScheduleDeleteResponse(BaseModel):
     """Schema for schedule deletion responses."""
 

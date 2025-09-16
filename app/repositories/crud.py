@@ -124,6 +124,57 @@ class ScheduleCRUD:
             return await conn.fetch(query, day)
 
     @staticmethod
+    async def partial_update(device_name: str, update_data: Dict[str, Any]) -> bool:
+        """
+        Partially update a schedule for a device.
+
+        Args:
+            device_name: Name of the device
+            update_data: Dictionary containing fields to update
+
+        Returns:
+            True if schedule was updated, False if not found
+
+        Raises:
+            Exception: If database operation fails
+        """
+        pool = await get_postgres()
+        async with pool.acquire() as conn:
+            # First check if the schedule exists
+            existing = await conn.fetchrow(
+                "SELECT id FROM schedules WHERE device_name = $1", device_name
+            )
+            if not existing:
+                return False
+
+            # Build dynamic update query
+            update_fields = []
+            values = []
+            param_idx = 2  # $1 is for device_name
+
+            for field, value in update_data.items():
+                if value is not None:
+                    update_fields.append(f"{field} = ${param_idx}")
+                    values.append(value)
+                    param_idx += 1
+
+            if not update_fields:
+                return True  # No updates needed
+
+            # Always update the updated_at field
+            update_fields.append("updated_at = NOW()")
+
+            query = f"""
+                UPDATE schedules
+                SET {', '.join(update_fields)}
+                WHERE device_name = $1
+            """
+
+            await conn.execute(query, device_name, *values)
+            logger.info(f"Schedule for device {device_name} partially updated")
+            return True
+
+    @staticmethod
     async def delete_by_device_name(device_name: str) -> bool:
         """
         Delete schedule by device name.

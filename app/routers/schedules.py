@@ -1,12 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
 from typing import List, Optional
-import asyncpg
 import json
 import os
 from datetime import datetime, time
 
 from ..schemas.schedule import (
     ScheduleCreateRequest,
+    ScheduleUpdateRequest,
+    SchedulePatchRequest,
     ScheduleResponse,
     ScheduleConfigSchema,
     WorkHoursSchema,
@@ -14,13 +15,6 @@ from ..schemas.schedule import (
     ExtraHourSchema,
     MetadataSchema,
     ScheduleDeleteResponse,
-)
-from ..models.schedule import (
-    ScheduleEntity,
-    Schedule,
-    WorkHours,
-    Break,
-    ExtraHour,
 )
 from ..repositories.crud import schedule_crud
 
@@ -30,6 +24,51 @@ router = APIRouter(prefix="/schedules", tags=["schedules"])
 def parse_time_string(time_str: str) -> time:
     """Convert HH:MM string to Python time object"""
     return datetime.strptime(time_str, "%H:%M").time()
+
+
+def build_schedule_response(db_schedule: dict) -> ScheduleResponse:
+    """
+    Build a ScheduleResponse from database record.
+
+    Args:
+        db_schedule: Database record containing schedule data
+
+    Returns:
+        ScheduleResponse object
+    """
+    # Preparar extra_hours si existe
+    extra_hours_dict = None
+    if db_schedule["extra_hours"]:
+        # Parse JSON if it's a string
+        extra_hours_data = db_schedule["extra_hours"]
+        if isinstance(extra_hours_data, str):
+            extra_hours_data = json.loads(extra_hours_data)
+
+        extra_hours_dict = {}
+        for day, hours in extra_hours_data.items():
+            extra_hours_dict[day] = [ExtraHourSchema(**hour) for hour in hours]
+
+    return ScheduleResponse(
+        id=str(db_schedule["id"]),
+        device_name=db_schedule["device_name"],
+        schedule=ScheduleConfigSchema(
+            active_days=db_schedule["active_days"],
+            work_hours=WorkHoursSchema(
+                start=str(db_schedule["work_start_time"]),
+                end=str(db_schedule["work_end_time"]),
+            ),
+            break_time=BreakSchema(
+                start=str(db_schedule["break_start_time"]),
+                duration_minutes=db_schedule["break_duration"],
+            ),
+        ),
+        extra_hours=extra_hours_dict,
+        metadata=MetadataSchema(
+            created_at=db_schedule["created_at"],
+            version=db_schedule["version"],
+            source=db_schedule["source"],
+        ),
+    )
 
 
 async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
@@ -113,45 +152,155 @@ async def create_or_update_schedule(
         if not db_schedule:
             raise HTTPException(status_code=500, detail="Error al crear el horario")
 
-        # Preparar respuesta
-        extra_hours_dict = None
-        if db_schedule["extra_hours"]:
-            # Parse JSON if it's a string
-            extra_hours_data = db_schedule["extra_hours"]
-            if isinstance(extra_hours_data, str):
-                extra_hours_data = json.loads(extra_hours_data)
-
-            extra_hours_dict = {}
-            for day, hours in extra_hours_data.items():
-                extra_hours_dict[day] = [ExtraHourSchema(**hour) for hour in hours]
-
-        response = ScheduleResponse(
-            id=str(db_schedule["id"]),
-            device_name=db_schedule["device_name"],
-            schedule=ScheduleConfigSchema(
-                active_days=db_schedule["active_days"],
-                work_hours=WorkHoursSchema(
-                    start=str(db_schedule["work_start_time"]),
-                    end=str(db_schedule["work_end_time"]),
-                ),
-                break_time=BreakSchema(
-                    start=str(db_schedule["break_start_time"]),
-                    duration_minutes=db_schedule["break_duration"],
-                ),
-            ),
-            extra_hours=extra_hours_dict,
-            metadata=MetadataSchema(
-                created_at=db_schedule["created_at"],
-                version=db_schedule["version"],
-                source=db_schedule["source"],
-            ),
-        )
-
-        return response
+        return build_schedule_response(db_schedule)
 
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error al procesar el horario: {str(e)}"
+        )
+
+
+@router.put("/{device_name}", response_model=ScheduleResponse)
+async def update_schedule(
+    device_name: str,
+    schedule_request: ScheduleUpdateRequest,
+    api_key_valid: None = Depends(verify_api_key),
+):
+    """
+    Actualizar completamente un horario existente (PUT).
+
+    Requiere que el dispositivo exista previamente y actualiza todos los campos.
+    """
+    try:
+        # Verificar que el schedule existe
+        existing_schedule = await schedule_crud.get_by_device_name(device_name)
+        if not existing_schedule:
+            raise HTTPException(status_code=404, detail="Horario no encontrado")
+
+        # Verificar que device_name coincide
+        if schedule_request.device_name != device_name:
+            raise HTTPException(
+                status_code=400,
+                detail="El nombre del dispositivo no coincide con la URL",
+            )
+
+        # Preparar datos para la base de datos (igual que en POST)
+        schedule_data = {
+            "device_name": device_name,
+            "active_days": schedule_request.schedule.active_days,
+            "work_start_time": parse_time_string(
+                schedule_request.schedule.work_hours.start
+            ),
+            "work_end_time": parse_time_string(
+                schedule_request.schedule.work_hours.end
+            ),
+            "break_start_time": parse_time_string(
+                schedule_request.schedule.break_time.start
+            ),
+            "break_duration": schedule_request.schedule.break_time.duration_minutes,
+            "extra_hours": (
+                json.dumps(
+                    {
+                        day: [hour.model_dump() for hour in hours]
+                        for day, hours in schedule_request.extra_hours.items()
+                    }
+                )
+                if schedule_request.extra_hours
+                else None
+            ),
+            "version": (
+                schedule_request.metadata.version
+                if schedule_request.metadata
+                else "1.0"
+            ),
+            "source": (
+                schedule_request.metadata.source if schedule_request.metadata else "api"
+            ),
+        }
+
+        # Actualizar horario
+        await schedule_crud.create_or_update(schedule_data)
+
+        # Obtener el horario actualizado
+        db_schedule = await schedule_crud.get_by_device_name(device_name)
+        return build_schedule_response(db_schedule)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error al actualizar el horario: {str(e)}"
+        )
+
+
+@router.patch("/{device_name}", response_model=ScheduleResponse)
+async def patch_schedule(
+    device_name: str,
+    patch_request: SchedulePatchRequest,
+    api_key_valid: None = Depends(verify_api_key),
+):
+    """
+    Actualizar parcialmente un horario existente (PATCH).
+
+    Permite actualizar solo los campos especificados sin afectar los demás.
+    """
+    try:
+        # Verificar que el schedule existe
+        existing_schedule = await schedule_crud.get_by_device_name(device_name)
+        if not existing_schedule:
+            raise HTTPException(status_code=404, detail="Horario no encontrado")
+
+        # Preparar datos de actualización parcial
+        update_data = {}
+
+        if patch_request.schedule:
+            update_data["active_days"] = patch_request.schedule.active_days
+            update_data["work_start_time"] = parse_time_string(
+                patch_request.schedule.work_hours.start
+            )
+            update_data["work_end_time"] = parse_time_string(
+                patch_request.schedule.work_hours.end
+            )
+            update_data["break_start_time"] = parse_time_string(
+                patch_request.schedule.break_time.start
+            )
+            update_data["break_duration"] = (
+                patch_request.schedule.break_time.duration_minutes
+            )
+
+        if patch_request.extra_hours is not None:
+            update_data["extra_hours"] = (
+                json.dumps(
+                    {
+                        day: [hour.model_dump() for hour in hours]
+                        for day, hours in patch_request.extra_hours.items()
+                    }
+                )
+                if patch_request.extra_hours
+                else None
+            )
+
+        if patch_request.metadata:
+            if patch_request.metadata.version:
+                update_data["version"] = patch_request.metadata.version
+            if patch_request.metadata.source:
+                update_data["source"] = patch_request.metadata.source
+
+        # Actualizar solo los campos especificados
+        updated = await schedule_crud.partial_update(device_name, update_data)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Horario no encontrado")
+
+        # Obtener el horario actualizado
+        db_schedule = await schedule_crud.get_by_device_name(device_name)
+        return build_schedule_response(db_schedule)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar parcialmente el horario: {str(e)}",
         )
 
 
@@ -182,46 +331,7 @@ async def get_schedules_by_day_endpoint(
 
         db_schedules = await schedule_crud.get_by_day(day.lower())
 
-        schedules = []
-        for db_schedule in db_schedules:
-            # Preparar extra_hours si existe
-            extra_hours_dict = None
-            if db_schedule["extra_hours"]:
-                # Parse JSON if it's a string
-                extra_hours_data = db_schedule["extra_hours"]
-                if isinstance(extra_hours_data, str):
-                    extra_hours_data = json.loads(extra_hours_data)
-
-                extra_hours_dict = {}
-                for day_key, hours in extra_hours_data.items():
-                    extra_hours_dict[day_key] = [
-                        ExtraHourSchema(**hour) for hour in hours
-                    ]
-
-            response = ScheduleResponse(
-                id=str(db_schedule["id"]),
-                device_name=db_schedule["device_name"],
-                schedule=ScheduleConfigSchema(
-                    active_days=db_schedule["active_days"],
-                    work_hours=WorkHoursSchema(
-                        start=str(db_schedule["work_start_time"]),
-                        end=str(db_schedule["work_end_time"]),
-                    ),
-                    break_time=BreakSchema(
-                        start=str(db_schedule["break_start_time"]),
-                        duration_minutes=db_schedule["break_duration"],
-                    ),
-                ),
-                extra_hours=extra_hours_dict,
-                metadata=MetadataSchema(
-                    created_at=db_schedule["created_at"],
-                    version=db_schedule["version"],
-                    source=db_schedule["source"],
-                ),
-            )
-            schedules.append(response)
-
-        return schedules
+        return [build_schedule_response(db_schedule) for db_schedule in db_schedules]
 
     except HTTPException:
         raise
@@ -242,41 +352,7 @@ async def get_schedule(device_name: str, api_key_valid: None = Depends(verify_ap
         if not db_schedule:
             return None
 
-        # Preparar extra_hours si existe
-        extra_hours_dict = None
-        if db_schedule["extra_hours"]:
-            # Parse JSON if it's a string
-            extra_hours_data = db_schedule["extra_hours"]
-            if isinstance(extra_hours_data, str):
-                extra_hours_data = json.loads(extra_hours_data)
-
-            extra_hours_dict = {}
-            for day, hours in extra_hours_data.items():
-                extra_hours_dict[day] = [ExtraHourSchema(**hour) for hour in hours]
-
-        response = ScheduleResponse(
-            id=str(db_schedule["id"]),
-            device_name=db_schedule["device_name"],
-            schedule=ScheduleConfigSchema(
-                active_days=db_schedule["active_days"],
-                work_hours=WorkHoursSchema(
-                    start=str(db_schedule["work_start_time"]),
-                    end=str(db_schedule["work_end_time"]),
-                ),
-                break_time=BreakSchema(
-                    start=str(db_schedule["break_start_time"]),
-                    duration_minutes=db_schedule["break_duration"],
-                ),
-            ),
-            extra_hours=extra_hours_dict,
-            metadata=MetadataSchema(
-                created_at=db_schedule["created_at"],
-                version=db_schedule["version"],
-                source=db_schedule["source"],
-            ),
-        )
-
-        return response
+        return build_schedule_response(db_schedule)
 
     except Exception as e:
         raise HTTPException(
@@ -291,45 +367,7 @@ async def get_all_schedules_endpoint(api_key_valid: None = Depends(verify_api_ke
     """
     try:
         db_schedules = await schedule_crud.get_all()
-
-        schedules = []
-        for db_schedule in db_schedules:
-            # Preparar extra_hours si existe
-            extra_hours_dict = None
-            if db_schedule["extra_hours"]:
-                # Parse JSON if it's a string
-                extra_hours_data = db_schedule["extra_hours"]
-                if isinstance(extra_hours_data, str):
-                    extra_hours_data = json.loads(extra_hours_data)
-
-                extra_hours_dict = {}
-                for day, hours in extra_hours_data.items():
-                    extra_hours_dict[day] = [ExtraHourSchema(**hour) for hour in hours]
-
-            response = ScheduleResponse(
-                id=str(db_schedule["id"]),
-                device_name=db_schedule["device_name"],
-                schedule=ScheduleConfigSchema(
-                    active_days=db_schedule["active_days"],
-                    work_hours=WorkHoursSchema(
-                        start=str(db_schedule["work_start_time"]),
-                        end=str(db_schedule["work_end_time"]),
-                    ),
-                    break_time=BreakSchema(
-                        start=str(db_schedule["break_start_time"]),
-                        duration_minutes=db_schedule["break_duration"],
-                    ),
-                ),
-                extra_hours=extra_hours_dict,
-                metadata=MetadataSchema(
-                    created_at=db_schedule["created_at"],
-                    version=db_schedule["version"],
-                    source=db_schedule["source"],
-                ),
-            )
-            schedules.append(response)
-
-        return schedules
+        return [build_schedule_response(db_schedule) for db_schedule in db_schedules]
 
     except Exception as e:
         raise HTTPException(
