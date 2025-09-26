@@ -1,4 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from typing import List, Optional
 import json
 import os
@@ -15,6 +17,9 @@ from ..schemas.schedule import (
     ExtraHourSchema,
     MetadataSchema,
     ScheduleDeleteResponse,
+    ScheduleStatsSchema,
+    AllScheduleStatsResponse,
+    SingleScheduleStatsResponse,
 )
 from ..repositories.crud import schedule_crud
 
@@ -24,6 +29,84 @@ router = APIRouter(prefix="/schedules", tags=["schedules"])
 def parse_time_string(time_str: str) -> time:
     """Convert HH:MM string to Python time object"""
     return datetime.strptime(time_str, "%H:%M").time()
+
+
+def time_to_minutes(time_obj: time) -> int:
+    """Convert time object to minutes since midnight"""
+    return time_obj.hour * 60 + time_obj.minute
+
+
+def calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> dict:
+    """
+    Calculate work hours usage statistics for a schedule.
+
+    Args:
+        db_schedule: Database schedule record
+        current_time: Current datetime
+
+    Returns:
+        Dictionary with usage statistics
+    """
+    current_day = current_time.strftime("%A").lower()
+    current_time_obj = current_time.time()
+    current_time_str = current_time_obj.strftime("%H:%M")
+
+    # Get work hours
+    work_start = db_schedule["work_start_time"]
+    work_end = db_schedule["work_end_time"]
+    break_start = db_schedule["break_start_time"]
+    break_duration = db_schedule["break_duration"]
+
+    # Calculate total work hours for the day (excluding break)
+    work_start_minutes = time_to_minutes(work_start)
+    work_end_minutes = time_to_minutes(work_end)
+    total_work_minutes = work_end_minutes - work_start_minutes - break_duration
+    total_work_hours = total_work_minutes / 60.0
+
+    # Calculate hours used so far
+    current_minutes = time_to_minutes(current_time_obj)
+    hours_used = 0.0
+
+    # Check if device is active today
+    if current_day not in db_schedule["active_days"]:
+        hours_used = 0.0
+        usage_percentage = 0.0
+    elif current_minutes < work_start_minutes:
+        # Before work starts
+        hours_used = 0.0
+        usage_percentage = 0.0
+    elif current_minutes >= work_end_minutes:
+        # After work ends - full day worked
+        hours_used = total_work_hours
+        usage_percentage = 100.0
+    else:
+        # During work hours - calculate partial usage
+        work_minutes_elapsed = current_minutes - work_start_minutes
+
+        # Subtract break time if we've passed the break
+        break_start_minutes = time_to_minutes(break_start)
+        if current_minutes > break_start_minutes + break_duration:
+            # Passed the entire break
+            work_minutes_elapsed -= break_duration
+        elif current_minutes > break_start_minutes:
+            # Currently in break - subtract partial break time
+            work_minutes_elapsed -= (current_minutes - break_start_minutes)
+
+        hours_used = max(0, work_minutes_elapsed) / 60.0
+        usage_percentage = (hours_used / total_work_hours * 100) if total_work_hours > 0 else 0.0
+
+    # Cap usage percentage at 100%
+    usage_percentage = min(100.0, max(0.0, usage_percentage))
+
+    return {
+        "device_name": db_schedule["device_name"],
+        "schedule_start": work_start.strftime("%H:%M"),
+        "schedule_end": work_end.strftime("%H:%M"),
+        "current_time": current_time_str,
+        "hours_used": round(hours_used, 2),
+        "total_work_hours": round(total_work_hours, 2),
+        "usage_percentage": round(usage_percentage, 2)
+    }
 
 
 def build_schedule_response(db_schedule: dict) -> ScheduleResponse:
@@ -398,3 +481,114 @@ async def delete_schedule_endpoint(
         raise HTTPException(
             status_code=500, detail=f"Error al eliminar el horario: {str(e)}"
         )
+
+
+@router.get("/stats/all", response_model=AllScheduleStatsResponse)
+async def get_all_schedule_stats(api_key_valid: None = Depends(verify_api_key)):
+    """
+    Get work hour usage statistics for all devices.
+
+    Returns schedule start/end times, current time, hours used so far,
+    and usage percentage for all devices.
+    """
+    try:
+        current_time = datetime.now()
+        db_schedules = await schedule_crud.get_all()
+
+        if not db_schedules:
+            return AllScheduleStatsResponse(
+                request_time=current_time.strftime("%H:%M"),
+                devices=[]
+            )
+
+        device_stats = []
+        for db_schedule in db_schedules:
+            stats = calculate_work_hours_usage(db_schedule, current_time)
+            device_stats.append(ScheduleStatsSchema(**stats))
+
+        return AllScheduleStatsResponse(
+            request_time=current_time.strftime("%H:%M"),
+            devices=device_stats
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error al obtener estadísticas: {str(e)}"
+        )
+
+
+@router.get("/stats/{device_name}", response_model=SingleScheduleStatsResponse)
+async def get_device_schedule_stats(
+    device_name: str, api_key_valid: None = Depends(verify_api_key)
+):
+    """
+    Get work hour usage statistics for a specific device.
+
+    Returns schedule start/end times, current time, hours used so far,
+    and usage percentage for the requested device.
+    """
+    try:
+        current_time = datetime.now()
+        db_schedule = await schedule_crud.get_by_device_name(device_name)
+
+        if not db_schedule:
+            raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+
+        stats = calculate_work_hours_usage(db_schedule, current_time)
+        device_stats = ScheduleStatsSchema(**stats)
+
+        return SingleScheduleStatsResponse(
+            request_time=current_time.strftime("%H:%M"),
+            device_stats=device_stats
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error al obtener estadísticas del dispositivo: {str(e)}"
+        )
+
+
+@router.get("/docs", include_in_schema=False)
+async def get_schedules_docs(api_key_valid: None = Depends(verify_api_key)):
+    """
+    Get Swagger UI documentation for schedules API.
+
+    This provides interactive API documentation specifically for schedule endpoints.
+    """
+    return get_swagger_ui_html(
+        openapi_url="/schedules/openapi.json",
+        title="Schedules API - Swagger UI",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+    )
+
+
+@router.get("/redoc", include_in_schema=False)
+async def get_schedules_redoc(api_key_valid: None = Depends(verify_api_key)):
+    """
+    Get ReDoc documentation for schedules API.
+
+    This provides clean, readable API documentation specifically for schedule endpoints.
+    """
+    return get_redoc_html(
+        openapi_url="/schedules/openapi.json",
+        title="Schedules API - ReDoc",
+        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2.1.0/bundles/redoc.standalone.js",
+    )
+
+
+@router.get("/openapi.json", include_in_schema=False)
+async def get_schedules_openapi(api_key_valid: None = Depends(verify_api_key)):
+    """
+    Get OpenAPI JSON schema for schedules API.
+
+    This provides the OpenAPI specification specifically for schedule endpoints.
+    """
+    return get_openapi(
+        title="Schedules API",
+        version="1.0.0",
+        description="API for managing work schedules and shifts with statistics",
+        routes=router.routes,
+    )

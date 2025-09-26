@@ -184,6 +184,81 @@ class ScheduleDeleteResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ScheduleStatsSchema(BaseModel):
+    """Schema for individual device schedule statistics."""
+
+    device_name: str = Field(
+        ...,
+        serialization_alias="deviceName",
+        description="Device name"
+    )
+    schedule_start: str = Field(
+        ...,
+        serialization_alias="scheduleStart",
+        description="Schedule start time in HH:MM format"
+    )
+    schedule_end: str = Field(
+        ...,
+        serialization_alias="scheduleEnd",
+        description="Schedule end time in HH:MM format"
+    )
+    current_time: str = Field(
+        ...,
+        serialization_alias="currentTime",
+        description="Current time in HH:MM format"
+    )
+    hours_used: float = Field(
+        ...,
+        serialization_alias="hoursUsed",
+        description="Hours worked so far today"
+    )
+    total_work_hours: float = Field(
+        ...,
+        serialization_alias="totalWorkHours",
+        description="Total work hours scheduled for today"
+    )
+    usage_percentage: float = Field(
+        ...,
+        serialization_alias="usagePercentage",
+        description="Percentage of work time used (0-100)"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AllScheduleStatsResponse(BaseModel):
+    """Schema for all devices schedule statistics response."""
+
+    request_time: str = Field(
+        ...,
+        serialization_alias="requestTime",
+        description="Time when the request was made"
+    )
+    devices: List[ScheduleStatsSchema] = Field(
+        ...,
+        description="Statistics for all devices"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SingleScheduleStatsResponse(BaseModel):
+    """Schema for single device schedule statistics response."""
+
+    request_time: str = Field(
+        ...,
+        serialization_alias="requestTime",
+        description="Time when the request was made"
+    )
+    device_stats: ScheduleStatsSchema = Field(
+        ...,
+        serialization_alias="deviceStats",
+        description="Statistics for the requested device"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ErrorResponse(BaseModel):
     """Schema for error responses."""
 
