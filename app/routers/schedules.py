@@ -551,7 +551,7 @@ async def get_device_schedule_stats(
 
 
 @router.get("/docs", include_in_schema=False)
-async def get_schedules_docs(api_key_valid: None = Depends(verify_api_key)):
+async def get_schedules_docs():
     """
     Get Swagger UI documentation for schedules API.
 
@@ -566,7 +566,7 @@ async def get_schedules_docs(api_key_valid: None = Depends(verify_api_key)):
 
 
 @router.get("/redoc", include_in_schema=False)
-async def get_schedules_redoc(api_key_valid: None = Depends(verify_api_key)):
+async def get_schedules_redoc():
     """
     Get ReDoc documentation for schedules API.
 
@@ -580,7 +580,7 @@ async def get_schedules_redoc(api_key_valid: None = Depends(verify_api_key)):
 
 
 @router.get("/openapi.json", include_in_schema=False)
-async def get_schedules_openapi(api_key_valid: None = Depends(verify_api_key)):
+async def get_schedules_openapi():
     """
     Get OpenAPI JSON schema for schedules API.
 
