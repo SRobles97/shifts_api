@@ -8,14 +8,16 @@ from .schedule import (
     WorkHours,
     Break,
     ExtraHour,
+    DaySchedule,
     Schedule,
     ScheduleEntity,
 )
 
 __all__ = [
     "WorkHours",
-    "Break", 
+    "Break",
     "ExtraHour",
+    "DaySchedule",
     "Schedule",
     "ScheduleEntity",
 ]

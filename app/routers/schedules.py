@@ -11,7 +11,6 @@ from ..schemas.schedule import (
     ScheduleUpdateRequest,
     SchedulePatchRequest,
     ScheduleResponse,
-    ScheduleConfigSchema,
     WorkHoursSchema,
     BreakSchema,
     ExtraHourSchema,
@@ -51,11 +50,29 @@ def calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> dic
     current_time_obj = current_time.time()
     current_time_str = current_time_obj.strftime("%H:%M")
 
-    # Get work hours
-    work_start = db_schedule["work_start_time"]
-    work_end = db_schedule["work_end_time"]
-    break_start = db_schedule["break_start_time"]
-    break_duration = db_schedule["break_duration"]
+    # Parse day_schedules from JSONB
+    day_schedules_data = db_schedule["day_schedules"]
+    if isinstance(day_schedules_data, str):
+        day_schedules_data = json.loads(day_schedules_data)
+
+    # Check if device is active today
+    if current_day not in day_schedules_data:
+        return {
+            "device_name": db_schedule["device_name"],
+            "schedule_start": "00:00",
+            "schedule_end": "00:00",
+            "current_time": current_time_str,
+            "hours_used": 0.0,
+            "total_work_hours": 0.0,
+            "usage_percentage": 0.0,
+        }
+
+    # Get today's schedule
+    today_schedule = day_schedules_data[current_day]
+    work_start = parse_time_string(today_schedule["workHours"]["start"])
+    work_end = parse_time_string(today_schedule["workHours"]["end"])
+    break_start = parse_time_string(today_schedule["break"]["start"])
+    break_duration = today_schedule["break"]["durationMinutes"]
 
     # Calculate total work hours for the day (excluding break)
     work_start_minutes = time_to_minutes(work_start)
@@ -67,11 +84,7 @@ def calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> dic
     current_minutes = time_to_minutes(current_time_obj)
     hours_used = 0.0
 
-    # Check if device is active today
-    if current_day not in db_schedule["active_days"]:
-        hours_used = 0.0
-        usage_percentage = 0.0
-    elif current_minutes < work_start_minutes:
+    if current_minutes < work_start_minutes:
         # Before work starts
         hours_used = 0.0
         usage_percentage = 0.0
@@ -90,10 +103,12 @@ def calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> dic
             work_minutes_elapsed -= break_duration
         elif current_minutes > break_start_minutes:
             # Currently in break - subtract partial break time
-            work_minutes_elapsed -= (current_minutes - break_start_minutes)
+            work_minutes_elapsed -= current_minutes - break_start_minutes
 
         hours_used = max(0, work_minutes_elapsed) / 60.0
-        usage_percentage = (hours_used / total_work_hours * 100) if total_work_hours > 0 else 0.0
+        usage_percentage = (
+            (hours_used / total_work_hours * 100) if total_work_hours > 0 else 0.0
+        )
 
     # Cap usage percentage at 100%
     usage_percentage = min(100.0, max(0.0, usage_percentage))
@@ -105,7 +120,7 @@ def calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> dic
         "current_time": current_time_str,
         "hours_used": round(hours_used, 2),
         "total_work_hours": round(total_work_hours, 2),
-        "usage_percentage": round(usage_percentage, 2)
+        "usage_percentage": round(usage_percentage, 2),
     }
 
 
@@ -119,6 +134,21 @@ def build_schedule_response(db_schedule: dict) -> ScheduleResponse:
     Returns:
         ScheduleResponse object
     """
+    # Parse day_schedules from JSONB
+    day_schedules_data = db_schedule["day_schedules"]
+    if isinstance(day_schedules_data, str):
+        day_schedules_data = json.loads(day_schedules_data)
+
+    # Convert to DayScheduleSchema objects
+    from ..schemas.schedule import DayScheduleSchema
+
+    day_schedules_dict = {}
+    for day, day_config in day_schedules_data.items():
+        day_schedules_dict[day] = DayScheduleSchema(
+            work_hours=WorkHoursSchema(**day_config["workHours"]),
+            break_time=BreakSchema(**day_config["break"]),
+        )
+
     # Preparar extra_hours si existe
     extra_hours_dict = None
     if db_schedule["extra_hours"]:
@@ -134,17 +164,7 @@ def build_schedule_response(db_schedule: dict) -> ScheduleResponse:
     return ScheduleResponse(
         id=str(db_schedule["id"]),
         device_name=db_schedule["device_name"],
-        schedule=ScheduleConfigSchema(
-            active_days=db_schedule["active_days"],
-            work_hours=WorkHoursSchema(
-                start=str(db_schedule["work_start_time"]),
-                end=str(db_schedule["work_end_time"]),
-            ),
-            break_time=BreakSchema(
-                start=str(db_schedule["break_start_time"]),
-                duration_minutes=db_schedule["break_duration"],
-            ),
-        ),
+        schedule=day_schedules_dict,
         extra_hours=extra_hours_dict,
         metadata=MetadataSchema(
             created_at=db_schedule["created_at"],
@@ -190,20 +210,24 @@ async def create_or_update_schedule(
     El ID se genera automáticamente y extraHours puede ser null.
     """
     try:
+        # Convert day schedules to JSONB format
+        day_schedules_json = {}
+        for day, day_schedule in schedule_request.schedule.items():
+            day_schedules_json[day] = {
+                "workHours": {
+                    "start": day_schedule.work_hours.start,
+                    "end": day_schedule.work_hours.end,
+                },
+                "break": {
+                    "start": day_schedule.break_time.start,
+                    "durationMinutes": day_schedule.break_time.duration_minutes,
+                },
+            }
+
         # Preparar datos para la base de datos
         schedule_data = {
             "device_name": schedule_request.device_name,
-            "active_days": schedule_request.schedule.active_days,
-            "work_start_time": parse_time_string(
-                schedule_request.schedule.work_hours.start
-            ),
-            "work_end_time": parse_time_string(
-                schedule_request.schedule.work_hours.end
-            ),
-            "break_start_time": parse_time_string(
-                schedule_request.schedule.break_time.start
-            ),
-            "break_duration": schedule_request.schedule.break_time.duration_minutes,
+            "day_schedules": json.dumps(day_schedules_json),
             "extra_hours": (
                 json.dumps(
                     {
@@ -267,20 +291,24 @@ async def update_schedule(
                 detail="El nombre del dispositivo no coincide con la URL",
             )
 
+        # Convert day schedules to JSONB format
+        day_schedules_json = {}
+        for day, day_schedule in schedule_request.schedule.items():
+            day_schedules_json[day] = {
+                "workHours": {
+                    "start": day_schedule.work_hours.start,
+                    "end": day_schedule.work_hours.end,
+                },
+                "break": {
+                    "start": day_schedule.break_time.start,
+                    "durationMinutes": day_schedule.break_time.duration_minutes,
+                },
+            }
+
         # Preparar datos para la base de datos (igual que en POST)
         schedule_data = {
             "device_name": device_name,
-            "active_days": schedule_request.schedule.active_days,
-            "work_start_time": parse_time_string(
-                schedule_request.schedule.work_hours.start
-            ),
-            "work_end_time": parse_time_string(
-                schedule_request.schedule.work_hours.end
-            ),
-            "break_start_time": parse_time_string(
-                schedule_request.schedule.break_time.start
-            ),
-            "break_duration": schedule_request.schedule.break_time.duration_minutes,
+            "day_schedules": json.dumps(day_schedules_json),
             "extra_hours": (
                 json.dumps(
                     {
@@ -337,19 +365,20 @@ async def patch_schedule(
         update_data = {}
 
         if patch_request.schedule:
-            update_data["active_days"] = patch_request.schedule.active_days
-            update_data["work_start_time"] = parse_time_string(
-                patch_request.schedule.work_hours.start
-            )
-            update_data["work_end_time"] = parse_time_string(
-                patch_request.schedule.work_hours.end
-            )
-            update_data["break_start_time"] = parse_time_string(
-                patch_request.schedule.break_time.start
-            )
-            update_data["break_duration"] = (
-                patch_request.schedule.break_time.duration_minutes
-            )
+            # Convert day schedules to JSONB format
+            day_schedules_json = {}
+            for day, day_schedule in patch_request.schedule.items():
+                day_schedules_json[day] = {
+                    "workHours": {
+                        "start": day_schedule.work_hours.start,
+                        "end": day_schedule.work_hours.end,
+                    },
+                    "break": {
+                        "start": day_schedule.break_time.start,
+                        "durationMinutes": day_schedule.break_time.duration_minutes,
+                    },
+                }
+            update_data["day_schedules"] = json.dumps(day_schedules_json)
 
         if patch_request.extra_hours is not None:
             update_data["extra_hours"] = (
@@ -497,8 +526,7 @@ async def get_all_schedule_stats(api_key_valid: None = Depends(verify_api_key)):
 
         if not db_schedules:
             return AllScheduleStatsResponse(
-                request_time=current_time.strftime("%H:%M"),
-                devices=[]
+                request_time=current_time.strftime("%H:%M"), devices=[]
             )
 
         device_stats = []
@@ -507,8 +535,7 @@ async def get_all_schedule_stats(api_key_valid: None = Depends(verify_api_key)):
             device_stats.append(ScheduleStatsSchema(**stats))
 
         return AllScheduleStatsResponse(
-            request_time=current_time.strftime("%H:%M"),
-            devices=device_stats
+            request_time=current_time.strftime("%H:%M"), devices=device_stats
         )
 
     except Exception as e:
@@ -538,15 +565,15 @@ async def get_device_schedule_stats(
         device_stats = ScheduleStatsSchema(**stats)
 
         return SingleScheduleStatsResponse(
-            request_time=current_time.strftime("%H:%M"),
-            device_stats=device_stats
+            request_time=current_time.strftime("%H:%M"), device_stats=device_stats
         )
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error al obtener estadísticas del dispositivo: {str(e)}"
+            status_code=500,
+            detail=f"Error al obtener estadísticas del dispositivo: {str(e)}",
         )
 
 

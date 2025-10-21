@@ -31,26 +31,17 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO schedules (device_name, active_days, work_start_time, work_end_time,
-                                     break_start_time, break_duration, extra_hours, version, source, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-                ON CONFLICT (device_name) DO UPDATE SET 
-                    active_days        = EXCLUDED.active_days,
-                    work_start_time    = EXCLUDED.work_start_time,
-                    work_end_time      = EXCLUDED.work_end_time,
-                    break_start_time   = EXCLUDED.break_start_time,
-                    break_duration     = EXCLUDED.break_duration,
+                INSERT INTO schedules (device_name, day_schedules, extra_hours, version, source, updated_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+                ON CONFLICT (device_name) DO UPDATE SET
+                    day_schedules      = EXCLUDED.day_schedules,
                     extra_hours        = EXCLUDED.extra_hours,
                     version            = EXCLUDED.version,
                     source             = EXCLUDED.source,
                     updated_at         = NOW();
                 """,
                 schedule_data["device_name"],
-                schedule_data["active_days"],
-                schedule_data["work_start_time"],
-                schedule_data["work_end_time"],
-                schedule_data["break_start_time"],
-                schedule_data["break_duration"],
+                schedule_data["day_schedules"],
                 schedule_data.get("extra_hours"),
                 schedule_data.get("version", "1.0"),
                 schedule_data.get("source", "api"),
@@ -73,8 +64,7 @@ class ScheduleCRUD:
         pool = await get_postgres()
         async with pool.acquire() as conn:
             query = """
-                    SELECT id, device_name, active_days, work_start_time, work_end_time,
-                           break_start_time, break_duration, extra_hours, created_at, updated_at,
+                    SELECT id, device_name, day_schedules, extra_hours, created_at, updated_at,
                            version, source
                     FROM schedules
                     WHERE device_name = $1;
@@ -92,8 +82,7 @@ class ScheduleCRUD:
         pool = await get_postgres()
         async with pool.acquire() as conn:
             query = """
-                    SELECT id, device_name, active_days, work_start_time, work_end_time,
-                           break_start_time, break_duration, extra_hours, created_at, updated_at,
+                    SELECT id, device_name, day_schedules, extra_hours, created_at, updated_at,
                            version, source
                     FROM schedules
                     ORDER BY created_at DESC;
@@ -114,11 +103,10 @@ class ScheduleCRUD:
         pool = await get_postgres()
         async with pool.acquire() as conn:
             query = """
-                    SELECT id, device_name, active_days, work_start_time, work_end_time,
-                           break_start_time, break_duration, extra_hours, created_at, updated_at,
+                    SELECT id, device_name, day_schedules, extra_hours, created_at, updated_at,
                            version, source
                     FROM schedules
-                    WHERE $1 = ANY(active_days)
+                    WHERE day_schedules ? $1
                     ORDER BY device_name;
                     """
             return await conn.fetch(query, day)

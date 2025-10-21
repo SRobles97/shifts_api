@@ -127,45 +127,15 @@ class ExtraHour(BaseModel):
         return int((end_dt - start_dt).total_seconds() // 60)
 
 
-class Schedule(BaseModel):
+class DaySchedule(BaseModel):
     """
-    Core business model for work schedules.
+    Business model for a single day's schedule.
 
-    Represents the complete schedule configuration with business logic
-    for validation and calculations.
+    Represents work hours and break configuration for one specific day.
     """
 
-    VALID_DAYS: ClassVar[List[str]] = [
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday",
-    ]
-
-    active_days: List[str] = Field(..., description="List of active work days")
-    work_hours: WorkHours = Field(..., description="Regular work hours")
-    break_time: Break = Field(..., description="Break configuration")
-
-    @field_validator("active_days")
-    @classmethod
-    def validate_days(cls, v: List[str]) -> List[str]:
-        """Validate active days are valid weekdays; normalize and dedupe."""
-        if not v:
-            raise ValueError("At least one active day is required")
-        normalized = [day.lower() for day in v]
-        invalid = [d for d in normalized if d not in cls.VALID_DAYS]
-        if invalid:
-            raise ValueError(f"Invalid days: {invalid}")
-        # dedupe while preserving order
-        seen, out = set(), []
-        for d in normalized:
-            if d not in seen:
-                seen.add(d)
-                out.append(d)
-        return out
+    work_hours: WorkHours = Field(..., description="Work hours for this day")
+    break_time: Break = Field(..., description="Break configuration for this day")
 
     @field_validator("break_time")
     @classmethod
@@ -190,9 +160,75 @@ class Schedule(BaseModel):
         """Calculate total work minutes excluding break."""
         return self.work_hours.duration_minutes() - self.break_time.duration_minutes
 
+
+class Schedule(BaseModel):
+    """
+    Core business model for work schedules.
+
+    Represents the complete schedule configuration with business logic
+    for validation and calculations. Each day can have different work hours.
+    """
+
+    VALID_DAYS: ClassVar[List[str]] = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
+
+    day_schedules: Dict[str, DaySchedule] = Field(
+        ..., description="Schedule configuration for each active day"
+    )
+
+    @field_validator("day_schedules")
+    @classmethod
+    def validate_day_schedules(cls, v: Dict[str, DaySchedule]) -> Dict[str, DaySchedule]:
+        """Validate day schedules have valid day keys and at least one day."""
+        if not v:
+            raise ValueError("At least one day schedule is required")
+
+        # Normalize keys to lowercase and validate
+        normalized = {}
+        for day, schedule in v.items():
+            day_lower = day.lower()
+            if day_lower not in cls.VALID_DAYS:
+                raise ValueError(f"Invalid day: {day}")
+            normalized[day_lower] = schedule
+
+        return normalized
+
+    @property
+    def active_days(self) -> List[str]:
+        """Get list of active work days from day_schedules."""
+        return list(self.day_schedules.keys())
+
+    def total_work_minutes(self, day: Optional[str] = None) -> int:
+        """
+        Calculate total work minutes excluding break.
+
+        Args:
+            day: Optional day to calculate for. If None, returns total for first day.
+
+        Returns:
+            Total work minutes for the specified day.
+        """
+        if day:
+            day_lower = day.lower()
+            if day_lower in self.day_schedules:
+                return self.day_schedules[day_lower].total_work_minutes()
+            return 0
+        # Return first day's total if no day specified
+        if self.day_schedules:
+            first_day = list(self.day_schedules.keys())[0]
+            return self.day_schedules[first_day].total_work_minutes()
+        return 0
+
     def is_work_day(self, day: str) -> bool:
         """Check if a given day is a work day."""
-        return day.lower() in self.active_days
+        return day.lower() in self.day_schedules
 
 
 class ScheduleEntity(BaseModel):
@@ -240,7 +276,8 @@ class ScheduleEntity(BaseModel):
 
         # If schedule is available, enforce extra_hours only for active_days
         if schedule:
-            active = set(schedule.active_days)
+            active_days_list = schedule.active_days  # Now a property
+            active = set(active_days_list)
             invalid_inactive = [d for d in v.keys() if d.lower() not in active]
             if invalid_inactive:
                 raise ValueError(
@@ -269,7 +306,7 @@ class ScheduleEntity(BaseModel):
         if not self.schedule.is_work_day(day_l):
             return 0
 
-        total_minutes = self.schedule.total_work_minutes()
+        total_minutes = self.schedule.total_work_minutes(day_l)
 
         # Add extra hours for the day
         if self.extra_hours and day_l in self.extra_hours:
