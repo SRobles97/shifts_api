@@ -21,7 +21,7 @@ async def init_db():
     2. Intenta habilitar TimescaleDB (si está disponible)
     3. Crea la tabla de schedules para configuración de horarios
     4. Crea índices optimizados para consultas por dispositivo
-    
+
     Nota: No se aplican características de TimescaleDB (hypertables, compresión, retención)
     a la tabla schedules ya que es una tabla de configuración, no de series temporales.
 
@@ -37,6 +37,7 @@ async def init_db():
             dsn=os.getenv("DATABASE_URL"),
             min_size=1,  # Mínimo de conexiones activas
             max_size=5,  # Máximo de conexiones concurrentes
+            server_settings={"timezone": "UTC"},  # Garantiza sesiones en UTC
         )
         logger.info("Conexión a la base de datos PostgreSQL establecida.")
 
@@ -68,17 +69,13 @@ async def init_db():
                     (
                         id                  SERIAL      PRIMARY KEY,  -- ID único del horario
                         device_name         TEXT        NOT NULL,     -- Nombre del dispositivo
-                        active_days         TEXT[]      NOT NULL,     -- Días activos (array de strings)
-                        work_start_time     TIME        NOT NULL,     -- Hora de inicio de trabajo
-                        work_end_time       TIME        NOT NULL,     -- Hora de fin de trabajo
-                        break_start_time    TIME        NOT NULL,     -- Hora de inicio de descanso
-                        break_duration      INTEGER     NOT NULL,     -- Duración del descanso en minutos
+                        day_schedules       JSONB       NOT NULL,     -- Horarios por día (formato JSON)
                         extra_hours         JSONB       NULL,         -- Horas extra por día (formato JSON)
-                        created_at          TIMESTAMP   DEFAULT NOW(),-- Fecha de creación
-                        updated_at          TIMESTAMP   DEFAULT NOW(),-- Fecha de última actualización
+                        created_at          TIMESTAMPTZ DEFAULT NOW(),-- Fecha de creación (UTC)
+                        updated_at          TIMESTAMPTZ DEFAULT NOW(),-- Fecha de última actualización (UTC)
                         version             TEXT        DEFAULT '1.0',-- Versión del horario
                         source              TEXT        DEFAULT 'api',-- Fuente del horario
-                        
+
                         UNIQUE(device_name)  -- Un horario por dispositivo
                     );
                     """
@@ -128,7 +125,9 @@ async def setup_timescaledb(conn: asyncpg.Connection):
         # Skip TimescaleDB hypertable features for schedules table
         # The schedules table is a configuration table, not time-series data
         # It doesn't benefit from hypertable partitioning, compression, or retention policies
-        logger.info("Omitiendo configuración de hypertable para schedules (tabla de configuración, no series temporales).")
+        logger.info(
+            "Omitiendo configuración de hypertable para schedules (tabla de configuración, no series temporales)."
+        )
 
         # Crear índices optimizados para consultas frecuentes
         try:

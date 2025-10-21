@@ -36,29 +36,22 @@ class BreakSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-class ScheduleConfigSchema(BaseModel):
-    """Schema for basic schedule configuration."""
+class DayScheduleSchema(BaseModel):
+    """Schema for a single day's schedule configuration."""
 
-    # Acepta activeDays y active_days
-    active_days: List[str] = Field(
-        ...,
-        validation_alias=AliasChoices("activeDays", "active_days"),
-        serialization_alias="activeDays",
-        description="List of active work days",
-    )
     # Acepta workHours y work_hours
     work_hours: WorkHoursSchema = Field(
         ...,
         validation_alias=AliasChoices("workHours", "work_hours"),
         serialization_alias="workHours",
-        description="Regular work hours",
+        description="Work hours for this day",
     )
     # Acepta "break" (camel) y "break_time" (snake)
     break_time: BreakSchema = Field(
         ...,
         validation_alias=AliasChoices("break", "break_time"),
         serialization_alias="break",
-        description="Break configuration",
+        description="Break configuration for this day",
     )
 
     model_config = ConfigDict(populate_by_name=True)
@@ -99,8 +92,9 @@ class ScheduleCreateRequest(BaseModel):
         serialization_alias="deviceName",
         description="Device name",
     )
-    schedule: ScheduleConfigSchema = Field(
-        ..., description="Basic schedule configuration"
+    schedule: Dict[str, DayScheduleSchema] = Field(
+        ...,
+        description="Schedule configuration by day (e.g., {'monday': {...}, 'tuesday': {...}})",
     )
     # Acepta extraHours y extra_hours
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
@@ -122,8 +116,8 @@ class ScheduleResponse(BaseModel):
     device_name: str = Field(
         ..., serialization_alias="deviceName", description="Device name"
     )
-    schedule: ScheduleConfigSchema = Field(
-        ..., description="Basic schedule configuration"
+    schedule: Dict[str, DayScheduleSchema] = Field(
+        ..., description="Schedule configuration by day"
     )
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
         None, serialization_alias="extraHours", description="Extra hours by day of week"
@@ -143,8 +137,8 @@ class ScheduleUpdateRequest(BaseModel):
         serialization_alias="deviceName",
         description="Device name",
     )
-    schedule: ScheduleConfigSchema = Field(
-        ..., description="Basic schedule configuration"
+    schedule: Dict[str, DayScheduleSchema] = Field(
+        ..., description="Schedule configuration by day"
     )
     # Acepta extraHours y extra_hours
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
@@ -161,8 +155,8 @@ class ScheduleUpdateRequest(BaseModel):
 class SchedulePatchRequest(BaseModel):
     """Schema for partial schedule updates via PATCH."""
 
-    schedule: Optional[ScheduleConfigSchema] = Field(
-        None, description="Basic schedule configuration"
+    schedule: Optional[Dict[str, DayScheduleSchema]] = Field(
+        None, description="Schedule configuration by day"
     )
     # Acepta extraHours y extra_hours
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
@@ -188,39 +182,35 @@ class ScheduleStatsSchema(BaseModel):
     """Schema for individual device schedule statistics."""
 
     device_name: str = Field(
-        ...,
-        serialization_alias="deviceName",
-        description="Device name"
+        ..., serialization_alias="deviceName", description="Device name"
     )
     schedule_start: str = Field(
         ...,
         serialization_alias="scheduleStart",
-        description="Schedule start time in HH:MM format"
+        description="Schedule start time in HH:MM format",
     )
     schedule_end: str = Field(
         ...,
         serialization_alias="scheduleEnd",
-        description="Schedule end time in HH:MM format"
+        description="Schedule end time in HH:MM format",
     )
     current_time: str = Field(
         ...,
         serialization_alias="currentTime",
-        description="Current time in HH:MM format"
+        description="Current time in HH:MM format",
     )
     hours_used: float = Field(
-        ...,
-        serialization_alias="hoursUsed",
-        description="Hours worked so far today"
+        ..., serialization_alias="hoursUsed", description="Hours worked so far today"
     )
     total_work_hours: float = Field(
         ...,
         serialization_alias="totalWorkHours",
-        description="Total work hours scheduled for today"
+        description="Total work hours scheduled for today",
     )
     usage_percentage: float = Field(
         ...,
         serialization_alias="usagePercentage",
-        description="Percentage of work time used (0-100)"
+        description="Percentage of work time used (0-100)",
     )
 
     model_config = ConfigDict(populate_by_name=True)
@@ -232,11 +222,10 @@ class AllScheduleStatsResponse(BaseModel):
     request_time: str = Field(
         ...,
         serialization_alias="requestTime",
-        description="Time when the request was made"
+        description="Time when the request was made",
     )
     devices: List[ScheduleStatsSchema] = Field(
-        ...,
-        description="Statistics for all devices"
+        ..., description="Statistics for all devices"
     )
 
     model_config = ConfigDict(populate_by_name=True)
@@ -248,12 +237,12 @@ class SingleScheduleStatsResponse(BaseModel):
     request_time: str = Field(
         ...,
         serialization_alias="requestTime",
-        description="Time when the request was made"
+        description="Time when the request was made",
     )
     device_stats: ScheduleStatsSchema = Field(
         ...,
         serialization_alias="deviceStats",
-        description="Statistics for the requested device"
+        description="Statistics for the requested device",
     )
 
     model_config = ConfigDict(populate_by_name=True)

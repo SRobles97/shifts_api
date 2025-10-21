@@ -7,7 +7,7 @@ This module exports API schemas for request/response serialization.
 from .schedule import (
     WorkHoursSchema,
     BreakSchema,
-    ScheduleConfigSchema,
+    DayScheduleSchema,
     ExtraHourSchema,
     MetadataSchema,
     ScheduleCreateRequest,
@@ -19,7 +19,7 @@ from .schedule import (
 __all__ = [
     "WorkHoursSchema",
     "BreakSchema",
-    "ScheduleConfigSchema", 
+    "DayScheduleSchema",
     "ExtraHourSchema",
     "MetadataSchema",
     "ScheduleCreateRequest",
