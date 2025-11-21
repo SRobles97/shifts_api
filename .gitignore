@@ -84,3 +84,6 @@ Desktop.ini
 
 # Linux
 *~
+specs/
+
+docker-compose.prod.yml
