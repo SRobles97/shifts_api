@@ -8,16 +8,33 @@ separate from API serialization concerns.
 from pydantic import BaseModel, Field, field_validator
 from pydantic_core.core_schema import ValidationInfo
 from typing import List, Optional, Dict, ClassVar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
+from enum import Enum
 import re
 
 
 _TIME_RE = re.compile(r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _parse_hhmm(value: str) -> datetime:
     """Parse 'HH:MM' to a datetime (today's date)."""
     return datetime.strptime(value, "%H:%M")
+
+
+class RecurrencePattern(str, Enum):
+    """Enumeration for special day recurrence patterns."""
+    YEARLY = "yearly"
+    NONE = "none"
+
+
+class SpecialDayType(str, Enum):
+    """Enumeration for special day types."""
+    HOLIDAY = "holiday"
+    MAINTENANCE = "maintenance"
+    SPECIAL_EVENT = "special_event"
+    CLOSURE = "closure"
+    TRAINING = "training"
 
 
 class WorkHours(BaseModel):
@@ -161,6 +178,80 @@ class DaySchedule(BaseModel):
         return self.work_hours.duration_minutes() - self.break_time.duration_minutes
 
 
+class SpecialDay(BaseModel):
+    """
+    Business model for special day configuration.
+
+    Represents special days (holidays, maintenance, etc.) that override
+    regular weekday schedules on specific dates.
+    """
+
+    name: str = Field(..., min_length=1, max_length=100, description="Name of the special day")
+    type: SpecialDayType = Field(..., description="Type of special day")
+    work_hours: Optional[WorkHours] = Field(
+        None,
+        description="Work hours for this special day (None = no work)"
+    )
+    break_time: Optional[Break] = Field(
+        None,
+        description="Break configuration for this special day"
+    )
+    is_recurring: bool = Field(
+        default=False,
+        description="Whether this special day recurs annually"
+    )
+    recurrence_pattern: Optional[RecurrencePattern] = Field(
+        None,
+        description="Recurrence pattern if recurring"
+    )
+
+    @field_validator("break_time")
+    @classmethod
+    def validate_break_requires_work_hours(cls, v: Optional[Break], info: ValidationInfo) -> Optional[Break]:
+        """Break time requires work_hours to be set."""
+        work_hours = info.data.get("work_hours")
+        if v and not work_hours:
+            raise ValueError("Break cannot be set without work hours")
+
+        # Apply same validation as DaySchedule if both are present
+        if v and work_hours:
+            work_start_dt = _parse_hhmm(work_hours.start)
+            work_end_dt = _parse_hhmm(work_hours.end)
+            break_start_dt = _parse_hhmm(v.start)
+            break_end_dt = break_start_dt + timedelta(minutes=v.duration_minutes)
+
+            if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
+                raise ValueError("Break must start within work hours")
+            if break_end_dt > work_end_dt:
+                raise ValueError("Break must end within work hours")
+
+        return v
+
+    @field_validator("recurrence_pattern")
+    @classmethod
+    def validate_recurrence_pattern(cls, v: Optional[RecurrencePattern], info: ValidationInfo) -> Optional[RecurrencePattern]:
+        """Validate recurrence pattern consistency with is_recurring."""
+        is_recurring = info.data.get("is_recurring")
+
+        if v and v != RecurrencePattern.NONE and not is_recurring:
+            raise ValueError("recurrence_pattern requires is_recurring=True")
+        if is_recurring and not v:
+            raise ValueError("is_recurring=True requires recurrence_pattern to be set")
+
+        return v
+
+    def total_work_minutes(self) -> int:
+        """Calculate total work minutes for this special day (excluding break)."""
+        if not self.work_hours:
+            return 0
+
+        work_mins = self.work_hours.duration_minutes()
+        if self.break_time:
+            work_mins -= self.break_time.duration_minutes
+
+        return work_mins
+
+
 class Schedule(BaseModel):
     """
     Core business model for work schedules.
@@ -235,7 +326,7 @@ class ScheduleEntity(BaseModel):
     """
     Complete business entity for a device schedule.
 
-    Includes all schedule information plus metadata and extra hours.
+    Includes all schedule information plus metadata, extra hours, and special days.
     """
 
     id: Optional[int] = None
@@ -243,6 +334,9 @@ class ScheduleEntity(BaseModel):
     schedule: Schedule = Field(..., description="Basic schedule configuration")
     extra_hours: Optional[Dict[str, List[ExtraHour]]] = Field(
         None, description="Extra hours by day of week"
+    )
+    special_days: Optional[Dict[str, SpecialDay]] = Field(
+        None, description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
     )
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -300,6 +394,29 @@ class ScheduleEntity(BaseModel):
         # Normalize keys to lowercase
         return {k.lower(): v[k] for k in v}
 
+    @field_validator("special_days")
+    @classmethod
+    def validate_special_days(
+        cls, v: Optional[Dict[str, SpecialDay]]
+    ) -> Optional[Dict[str, SpecialDay]]:
+        """Validate special days date format and parseable dates."""
+        if not v:
+            return v
+
+        # Validate date format (YYYY-MM-DD) and parseability
+        for date_str in v.keys():
+            if not _DATE_RE.match(date_str):
+                raise ValueError(
+                    f"Invalid date format: {date_str}. Use YYYY-MM-DD format"
+                )
+            # Validate that it's a parseable date
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError(f"Invalid date: {date_str}")
+
+        return v
+
     def get_total_work_minutes_for_day(self, day: str) -> int:
         """Calculate total work minutes for a specific day including extra hours."""
         day_l = day.lower()
@@ -321,3 +438,56 @@ class ScheduleEntity(BaseModel):
         for day in Schedule.VALID_DAYS:
             total += self.get_total_work_minutes_for_day(day)
         return total
+
+    def get_effective_schedule_for_date(self, target_date: date_type) -> Optional[DaySchedule]:
+        """
+        Get the effective schedule for a specific date.
+
+        Priority order:
+        1. Special day with exact date match (highest priority)
+        2. Recurring special day with month-day match
+        3. Regular weekday schedule (lowest priority)
+
+        Args:
+            target_date: The date to get schedule for
+
+        Returns:
+            DaySchedule if there's work scheduled, None if no work (e.g., holiday)
+        """
+        date_str = target_date.strftime("%Y-%m-%d")
+
+        # Priority 1: Check exact date special day
+        if self.special_days and date_str in self.special_days:
+            special = self.special_days[date_str]
+            if special.work_hours:
+                # Create DaySchedule from special day
+                break_time = special.break_time if special.break_time else Break(
+                    start="12:00", duration_minutes=0
+                )
+                return DaySchedule(
+                    work_hours=special.work_hours,
+                    break_time=break_time
+                )
+            # No work on this special day
+            return None
+
+        # Priority 2: Check recurring special days (match month-day)
+        if self.special_days:
+            month_day = target_date.strftime("%m-%d")
+            for special_date_str, special in self.special_days.items():
+                # Check if this is a recurring special day and month-day matches
+                if special.is_recurring and special_date_str.endswith(month_day):
+                    if special.work_hours:
+                        break_time = special.break_time if special.break_time else Break(
+                            start="12:00", duration_minutes=0
+                        )
+                        return DaySchedule(
+                            work_hours=special.work_hours,
+                            break_time=break_time
+                        )
+                    # No work on this recurring special day
+                    return None
+
+        # Priority 3: Fall back to regular weekday schedule
+        weekday = target_date.strftime("%A").lower()
+        return self.schedule.day_schedules.get(weekday)

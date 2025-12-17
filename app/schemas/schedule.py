@@ -66,6 +66,42 @@ class ExtraHourSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SpecialDaySchema(BaseModel):
+    """Schema for special day configuration in API."""
+
+    name: str = Field(..., min_length=1, max_length=100, description="Name of the special day")
+    type: str = Field(
+        ...,
+        description="Type of special day: holiday, maintenance, special_event, closure, training"
+    )
+    work_hours: Optional[WorkHoursSchema] = Field(
+        None,
+        validation_alias=AliasChoices("workHours", "work_hours"),
+        serialization_alias="workHours",
+        description="Work hours for this special day (null = no work)"
+    )
+    break_time: Optional[BreakSchema] = Field(
+        None,
+        validation_alias=AliasChoices("break", "break_time"),
+        serialization_alias="break",
+        description="Break configuration for this special day"
+    )
+    is_recurring: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("isRecurring", "is_recurring"),
+        serialization_alias="isRecurring",
+        description="Whether this special day recurs annually"
+    )
+    recurrence_pattern: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("recurrencePattern", "recurrence_pattern"),
+        serialization_alias="recurrencePattern",
+        description="Recurrence pattern: yearly or none"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class MetadataSchema(BaseModel):
     """Schema for schedule metadata."""
 
@@ -103,6 +139,13 @@ class ScheduleCreateRequest(BaseModel):
         serialization_alias="extraHours",
         description="Extra hours by day of week",
     )
+    # Acepta specialDays y special_days
+    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
+        None,
+        validation_alias=AliasChoices("specialDays", "special_days"),
+        serialization_alias="specialDays",
+        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+    )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 
     # Clave para permitir poblar por nombre del campo o por alias
@@ -121,6 +164,9 @@ class ScheduleResponse(BaseModel):
     )
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
         None, serialization_alias="extraHours", description="Extra hours by day of week"
+    )
+    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
+        None, serialization_alias="specialDays", description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
     )
     metadata: MetadataSchema = Field(..., description="Schedule metadata")
 
@@ -147,6 +193,13 @@ class ScheduleUpdateRequest(BaseModel):
         serialization_alias="extraHours",
         description="Extra hours by day of week",
     )
+    # Acepta specialDays y special_days
+    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
+        None,
+        validation_alias=AliasChoices("specialDays", "special_days"),
+        serialization_alias="specialDays",
+        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+    )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -164,6 +217,13 @@ class SchedulePatchRequest(BaseModel):
         validation_alias=AliasChoices("extraHours", "extra_hours"),
         serialization_alias="extraHours",
         description="Extra hours by day of week",
+    )
+    # Acepta specialDays y special_days
+    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
+        None,
+        validation_alias=AliasChoices("specialDays", "special_days"),
+        serialization_alias="specialDays",
+        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
     )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 

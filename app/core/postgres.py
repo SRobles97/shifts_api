@@ -71,6 +71,7 @@ async def init_db():
                         device_name         TEXT        NOT NULL,     -- Nombre del dispositivo
                         day_schedules       JSONB       NOT NULL,     -- Horarios por día (formato JSON)
                         extra_hours         JSONB       NULL,         -- Horas extra por día (formato JSON)
+                        special_days        JSONB       NULL,         -- Días especiales con horarios personalizados
                         created_at          TIMESTAMPTZ DEFAULT NOW(),-- Fecha de creación (UTC)
                         updated_at          TIMESTAMPTZ DEFAULT NOW(),-- Fecha de última actualización (UTC)
                         version             TEXT        DEFAULT '1.0',-- Versión del horario
@@ -83,6 +84,15 @@ async def init_db():
                 logger.info(
                     "Tabla 'schedules' creada correctamente con clave primaria única."
                 )
+
+                # Add GIN index for special_days JSONB queries
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_schedules_special_days
+                    ON schedules USING GIN (special_days);
+                    """
+                )
+                logger.info("Índice GIN creado para special_days.")
             else:
                 logger.info("Tabla 'schedules' ya existe.")
 

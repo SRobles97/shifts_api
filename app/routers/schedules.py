@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header, Query, Body
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import json
 import os
+import re
 from datetime import datetime, time
 
 from ..schemas.schedule import (
@@ -19,6 +20,8 @@ from ..schemas.schedule import (
     ScheduleStatsSchema,
     AllScheduleStatsResponse,
     SingleScheduleStatsResponse,
+    DayScheduleSchema,
+    SpecialDaySchema,
 )
 from ..repositories.crud import schedule_crud
 
@@ -161,11 +164,41 @@ def build_schedule_response(db_schedule: dict) -> ScheduleResponse:
         for day, hours in extra_hours_data.items():
             extra_hours_dict[day] = [ExtraHourSchema(**hour) for hour in hours]
 
+    # Preparar special_days si existe
+    special_days_dict = None
+    if db_schedule.get("special_days"):
+        # Parse JSON if it's a string
+        special_days_data = db_schedule["special_days"]
+        if isinstance(special_days_data, str):
+            special_days_data = json.loads(special_days_data)
+
+        from ..schemas.schedule import SpecialDaySchema
+        special_days_dict = {}
+        for date_str, special_day in special_days_data.items():
+            # Parse work_hours and break_time if they exist
+            work_hours = None
+            if special_day.get("workHours"):
+                work_hours = WorkHoursSchema(**special_day["workHours"])
+
+            break_time = None
+            if special_day.get("break"):
+                break_time = BreakSchema(**special_day["break"])
+
+            special_days_dict[date_str] = SpecialDaySchema(
+                name=special_day["name"],
+                type=special_day["type"],
+                work_hours=work_hours,
+                break_time=break_time,
+                is_recurring=special_day.get("isRecurring", False),
+                recurrence_pattern=special_day.get("recurrencePattern"),
+            )
+
     return ScheduleResponse(
         id=str(db_schedule["id"]),
         device_name=db_schedule["device_name"],
         schedule=day_schedules_dict,
         extra_hours=extra_hours_dict,
+        special_days=special_days_dict,
         metadata=MetadataSchema(
             created_at=db_schedule["created_at"],
             version=db_schedule["version"],
@@ -224,6 +257,16 @@ async def create_or_update_schedule(
                 },
             }
 
+        # Preparar special_days si existe
+        special_days_json = None
+        if schedule_request.special_days:
+            special_days_json = json.dumps(
+                {
+                    date_str: special_day.model_dump(by_alias=True)
+                    for date_str, special_day in schedule_request.special_days.items()
+                }
+            )
+
         # Preparar datos para la base de datos
         schedule_data = {
             "device_name": schedule_request.device_name,
@@ -238,6 +281,7 @@ async def create_or_update_schedule(
                 if schedule_request.extra_hours
                 else None
             ),
+            "special_days": special_days_json,
             "version": (
                 schedule_request.metadata.version
                 if schedule_request.metadata
@@ -305,6 +349,16 @@ async def update_schedule(
                 },
             }
 
+        # Preparar special_days si existe
+        special_days_json = None
+        if schedule_request.special_days:
+            special_days_json = json.dumps(
+                {
+                    date_str: special_day.model_dump(by_alias=True)
+                    for date_str, special_day in schedule_request.special_days.items()
+                }
+            )
+
         # Preparar datos para la base de datos (igual que en POST)
         schedule_data = {
             "device_name": device_name,
@@ -319,6 +373,7 @@ async def update_schedule(
                 if schedule_request.extra_hours
                 else None
             ),
+            "special_days": special_days_json,
             "version": (
                 schedule_request.metadata.version
                 if schedule_request.metadata
@@ -389,6 +444,18 @@ async def patch_schedule(
                     }
                 )
                 if patch_request.extra_hours
+                else None
+            )
+
+        if patch_request.special_days is not None:
+            update_data["special_days"] = (
+                json.dumps(
+                    {
+                        date_str: special_day.model_dump(by_alias=True)
+                        for date_str, special_day in patch_request.special_days.items()
+                    }
+                )
+                if patch_request.special_days
                 else None
             )
 
@@ -575,6 +642,324 @@ async def get_device_schedule_stats(
             status_code=500,
             detail=f"Error al obtener estadísticas del dispositivo: {str(e)}",
         )
+
+
+# ========== Special Days Endpoints ==========
+
+
+@router.get("/special-days/{device_name}", response_model=Dict[str, Any])
+async def get_device_special_days(
+    device_name: str,
+    start_date: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$', alias="startDate"),
+    end_date: Optional[str] = Query(None, pattern=r'^\d{4}-\d{2}-\d{2}$', alias="endDate"),
+    api_key_valid: None = Depends(verify_api_key),
+):
+    """
+    Get special days for a device, optionally filtered by date range.
+
+    Query Parameters:
+    - startDate: Optional ISO date (YYYY-MM-DD) - start of range
+    - endDate: Optional ISO date (YYYY-MM-DD) - end of range
+    """
+    try:
+        # If date range provided, use get_special_days_in_range
+        if start_date and end_date:
+            special_days = await schedule_crud.get_special_days_in_range(
+                device_name, start_date, end_date
+            )
+            if special_days is None:
+                raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+            return special_days
+
+        # Otherwise, get all special days for the device
+        db_schedule = await schedule_crud.get_by_device_name(device_name)
+        if not db_schedule:
+            raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+
+        special_days_data = db_schedule.get("special_days")
+        if not special_days_data:
+            return {}
+
+        # Parse JSON if string
+        if isinstance(special_days_data, str):
+            return json.loads(special_days_data)
+        return special_days_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error al obtener días especiales: {str(e)}"
+        )
+
+
+@router.post("/special-days/{device_name}", response_model=ScheduleResponse)
+async def add_special_day(
+    device_name: str,
+    date: str = Query(..., pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    special_day: SpecialDaySchema = Body(...),
+    api_key_valid: None = Depends(verify_api_key),
+):
+    """
+    Add or update a single special day for a device.
+
+    Query Parameters:
+    - date: ISO date (YYYY-MM-DD) for the special day
+    """
+    try:
+
+        # Get existing schedule
+        db_schedule = await schedule_crud.get_by_device_name(device_name)
+        if not db_schedule:
+            raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+
+        # Parse existing special_days
+        special_days_data = db_schedule.get("special_days")
+        if special_days_data:
+            if isinstance(special_days_data, str):
+                special_days = json.loads(special_days_data)
+            else:
+                special_days = special_days_data
+        else:
+            special_days = {}
+
+        # Add or update the special day
+        special_days[date] = special_day.model_dump(by_alias=True)
+
+        # Update in database
+        update_data = {"special_days": json.dumps(special_days)}
+        await schedule_crud.partial_update(device_name, update_data)
+
+        # Return updated schedule
+        updated_schedule = await schedule_crud.get_by_device_name(device_name)
+        return build_schedule_response(updated_schedule)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error al añadir día especial: {str(e)}"
+        )
+
+
+@router.delete("/special-days/{device_name}/{date}", response_model=ScheduleDeleteResponse)
+async def delete_special_day(
+    device_name: str,
+    date: str,
+    api_key_valid: None = Depends(verify_api_key),
+):
+    """
+    Delete a specific special day for a device.
+
+    Path Parameters:
+    - device_name: Device identifier
+    - date: ISO date (YYYY-MM-DD) of the special day to delete
+    """
+    try:
+        # Validate date format
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+            raise HTTPException(
+                status_code=400, detail="Formato de fecha inválido. Use YYYY-MM-DD"
+            )
+
+        # Get existing schedule
+        db_schedule = await schedule_crud.get_by_device_name(device_name)
+        if not db_schedule:
+            raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+
+        # Parse existing special_days
+        special_days_data = db_schedule.get("special_days")
+        if not special_days_data:
+            raise HTTPException(
+                status_code=404, detail="No hay días especiales para este dispositivo"
+            )
+
+        if isinstance(special_days_data, str):
+            special_days = json.loads(special_days_data)
+        else:
+            special_days = special_days_data
+
+        # Check if date exists
+        if date not in special_days:
+            raise HTTPException(status_code=404, detail="Día especial no encontrado")
+
+        # Remove the special day
+        del special_days[date]
+
+        # Update in database
+        update_data = {
+            "special_days": json.dumps(special_days) if special_days else None
+        }
+        await schedule_crud.partial_update(device_name, update_data)
+
+        return ScheduleDeleteResponse(
+            message=f"Día especial {date} eliminado para {device_name}"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error al eliminar día especial: {str(e)}"
+        )
+
+
+@router.get("/effective-schedule/{device_name}/{date}", response_model=Optional[DayScheduleSchema])
+async def get_effective_schedule(
+    device_name: str,
+    date: str,
+    api_key_valid: None = Depends(verify_api_key),
+):
+    """
+    Get the effective schedule for a device on a specific date.
+
+    Returns the actual schedule considering:
+    1. Special days (exact match)
+    2. Recurring special days (annual)
+    3. Regular weekday schedule
+
+    Path Parameters:
+    - device_name: Device identifier
+    - date: ISO date (YYYY-MM-DD)
+
+    Returns:
+    - DayScheduleSchema if there's work scheduled
+    - null if no work on that date
+    """
+    try:
+        # Validate date format
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+            raise HTTPException(
+                status_code=400, detail="Formato de fecha inválido. Use YYYY-MM-DD"
+            )
+
+        from datetime import datetime
+        from ..models.schedule import Schedule, DaySchedule, WorkHours, Break, SpecialDay, ExtraHour, ScheduleEntity
+
+        # Get device schedule
+        db_schedule = await schedule_crud.get_by_device_name(device_name)
+        if not db_schedule:
+            raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+
+        # Parse to ScheduleEntity model
+        day_schedules_data = db_schedule["day_schedules"]
+        if isinstance(day_schedules_data, str):
+            day_schedules_data = json.loads(day_schedules_data)
+
+        # Convert to model objects
+        day_schedules_dict = {}
+        for day, day_config in day_schedules_data.items():
+            day_schedules_dict[day] = DaySchedule(
+                work_hours=WorkHours(**day_config["workHours"]),
+                break_time=Break(**day_config["break"]),
+            )
+
+        schedule = Schedule(day_schedules=day_schedules_dict)
+
+        # Parse extra_hours if present
+        extra_hours_dict = None
+        if db_schedule.get("extra_hours"):
+            extra_hours_data = db_schedule["extra_hours"]
+            if isinstance(extra_hours_data, str):
+                extra_hours_data = json.loads(extra_hours_data)
+            extra_hours_dict = {
+                day: [ExtraHour(**hour) for hour in hours]
+                for day, hours in extra_hours_data.items()
+            }
+
+        # Parse special_days if present
+        special_days_dict = None
+        if db_schedule.get("special_days"):
+            special_days_data = db_schedule["special_days"]
+            if isinstance(special_days_data, str):
+                special_days_data = json.loads(special_days_data)
+            special_days_dict = {
+                date_str: SpecialDay(
+                    name=sd["name"],
+                    type=sd["type"],
+                    work_hours=WorkHours(**sd["workHours"]) if sd.get("workHours") else None,
+                    break_time=Break(**sd["break"]) if sd.get("break") else None,
+                    is_recurring=sd.get("isRecurring", False),
+                    recurrence_pattern=sd.get("recurrencePattern"),
+                )
+                for date_str, sd in special_days_data.items()
+            }
+
+        # Create ScheduleEntity
+        entity = ScheduleEntity(
+            id=db_schedule["id"],
+            device_name=device_name,
+            schedule=schedule,
+            extra_hours=extra_hours_dict,
+            special_days=special_days_dict,
+            created_at=db_schedule["created_at"],
+            updated_at=db_schedule["updated_at"],
+            version=db_schedule["version"],
+            source=db_schedule["source"],
+        )
+
+        # Get effective schedule for the date
+        target_date = datetime.strptime(date, "%Y-%m-%d").date()
+        effective = entity.get_effective_schedule_for_date(target_date)
+
+        if effective is None:
+            return None
+
+        # Convert to DayScheduleSchema
+        from ..schemas.schedule import DayScheduleSchema
+        return DayScheduleSchema(
+            work_hours=WorkHoursSchema(
+                start=effective.work_hours.start,
+                end=effective.work_hours.end,
+            ),
+            break_time=BreakSchema(
+                start=effective.break_time.start,
+                duration_minutes=effective.break_time.duration_minutes,
+            ),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error al obtener horario efectivo: {str(e)}"
+        )
+
+
+@router.get("/active-devices/{date}", response_model=List[ScheduleResponse])
+async def get_active_devices_on_date(
+    date: str,
+    api_key_valid: None = Depends(verify_api_key),
+):
+    """
+    Get all devices with active schedules on a specific date.
+
+    Path Parameters:
+    - date: ISO date (YYYY-MM-DD)
+    """
+    try:
+        # Validate date format
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+            raise HTTPException(
+                status_code=400, detail="Formato de fecha inválido. Use YYYY-MM-DD"
+            )
+
+        # Get schedules active on this date
+        schedules = await schedule_crud.get_schedules_for_date(date)
+
+        # Convert to response format
+        return [build_schedule_response(schedule) for schedule in schedules]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener dispositivos activos: {str(e)}",
+        )
+
+
+# ========== Documentation Endpoints ==========
 
 
 @router.get("/docs", include_in_schema=False)

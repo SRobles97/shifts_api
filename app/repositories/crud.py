@@ -31,11 +31,12 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO schedules (device_name, day_schedules, extra_hours, version, source, updated_at)
-                VALUES ($1, $2, $3, $4, $5, NOW())
+                INSERT INTO schedules (device_name, day_schedules, extra_hours, special_days, version, source, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
                 ON CONFLICT (device_name) DO UPDATE SET
                     day_schedules      = EXCLUDED.day_schedules,
                     extra_hours        = EXCLUDED.extra_hours,
+                    special_days       = EXCLUDED.special_days,
                     version            = EXCLUDED.version,
                     source             = EXCLUDED.source,
                     updated_at         = NOW();
@@ -43,6 +44,7 @@ class ScheduleCRUD:
                 schedule_data["device_name"],
                 schedule_data["day_schedules"],
                 schedule_data.get("extra_hours"),
+                schedule_data.get("special_days"),
                 schedule_data.get("version", "1.0"),
                 schedule_data.get("source", "api"),
             )
@@ -64,7 +66,7 @@ class ScheduleCRUD:
         pool = await get_postgres()
         async with pool.acquire() as conn:
             query = """
-                    SELECT id, device_name, day_schedules, extra_hours, created_at, updated_at,
+                    SELECT id, device_name, day_schedules, extra_hours, special_days, created_at, updated_at,
                            version, source
                     FROM schedules
                     WHERE device_name = $1;
@@ -82,7 +84,7 @@ class ScheduleCRUD:
         pool = await get_postgres()
         async with pool.acquire() as conn:
             query = """
-                    SELECT id, device_name, day_schedules, extra_hours, created_at, updated_at,
+                    SELECT id, device_name, day_schedules, extra_hours, special_days, created_at, updated_at,
                            version, source
                     FROM schedules
                     ORDER BY created_at DESC;
@@ -103,7 +105,7 @@ class ScheduleCRUD:
         pool = await get_postgres()
         async with pool.acquire() as conn:
             query = """
-                    SELECT id, device_name, day_schedules, extra_hours, created_at, updated_at,
+                    SELECT id, device_name, day_schedules, extra_hours, special_days, created_at, updated_at,
                            version, source
                     FROM schedules
                     WHERE day_schedules ? $1
@@ -161,6 +163,94 @@ class ScheduleCRUD:
             await conn.execute(query, device_name, *values)
             logger.info(f"Schedule for device {device_name} partially updated")
             return True
+
+    @staticmethod
+    async def get_schedules_for_date(target_date: str) -> List[asyncpg.Record]:
+        """
+        Get all schedules that are active on a specific date.
+
+        Considers:
+        - Special days with exact date match
+        - Recurring special days (yearly)
+        - Regular weekday schedules
+
+        Args:
+            target_date: ISO date string (YYYY-MM-DD)
+
+        Returns:
+            List of schedule records active on the date
+        """
+        pool = await get_postgres()
+        async with pool.acquire() as conn:
+            # Parse date to extract weekday and month-day
+            from datetime import datetime
+            date_obj = datetime.strptime(target_date, "%Y-%m-%d")
+            weekday = date_obj.strftime("%A").lower()
+            month_day = date_obj.strftime("-%m-%d")  # Format: -MM-DD for matching
+
+            query = """
+                SELECT id, device_name, day_schedules, extra_hours, special_days,
+                       created_at, updated_at, version, source
+                FROM schedules
+                WHERE
+                    -- Has special day for exact date
+                    (special_days ? $1)
+                    OR
+                    -- Has recurring special day (check for any key ending with month-day)
+                    (EXISTS (
+                        SELECT 1
+                        FROM jsonb_object_keys(special_days) AS key
+                        WHERE key LIKE '%' || $2
+                        AND (special_days->key->>'isRecurring')::boolean = true
+                    ))
+                    OR
+                    -- Regular weekday schedule
+                    (day_schedules ? $3)
+                ORDER BY device_name;
+            """
+
+            return await conn.fetch(query, target_date, month_day, weekday)
+
+    @staticmethod
+    async def get_special_days_in_range(
+        device_name: str,
+        start_date: str,
+        end_date: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get special days for a device within a date range.
+
+        Args:
+            device_name: Name of the device
+            start_date: ISO date string (YYYY-MM-DD)
+            end_date: ISO date string (YYYY-MM-DD)
+
+        Returns:
+            Dictionary of special days in range, or None if device not found
+        """
+        pool = await get_postgres()
+        async with pool.acquire() as conn:
+            query = """
+                SELECT special_days
+                FROM schedules
+                WHERE device_name = $1;
+            """
+            result = await conn.fetchval(query, device_name)
+
+            if result is None:
+                return None
+
+            # Parse and filter by date range
+            all_special_days = result if isinstance(result, dict) else json.loads(result)
+            if not all_special_days:
+                return {}
+
+            filtered = {}
+            for date_str, special_day in all_special_days.items():
+                if start_date <= date_str <= end_date:
+                    filtered[date_str] = special_day
+
+            return filtered
 
     @staticmethod
     async def delete_by_device_name(device_name: str) -> bool:
