@@ -199,6 +199,8 @@ def build_schedule_response(db_schedule: dict) -> ScheduleResponse:
         schedule=day_schedules_dict,
         extra_hours=extra_hours_dict,
         special_days=special_days_dict,
+        start_date=db_schedule["start_date"],
+        end_date=db_schedule["end_date"],
         metadata=MetadataSchema(
             created_at=db_schedule["created_at"],
             version=db_schedule["version"],
@@ -282,6 +284,8 @@ async def create_or_update_schedule(
                 else None
             ),
             "special_days": special_days_json,
+            "start_date": schedule_request.start_date,
+            "end_date": schedule_request.end_date,
             "version": (
                 schedule_request.metadata.version
                 if schedule_request.metadata
@@ -292,12 +296,16 @@ async def create_or_update_schedule(
             ),
         }
 
-        # Insertar/actualizar horario
-        await schedule_crud.create_or_update(schedule_data)
+        # Crear horario (returns schedule ID)
+        try:
+            schedule_id = await schedule_crud.create_or_update(schedule_data)
+        except ValueError as e:
+            # Date range overlap error
+            raise HTTPException(status_code=400, detail=str(e))
 
-        # Obtener el horario insertado con su ID
-        db_schedule = await schedule_crud.get_by_device_name(
-            schedule_request.device_name
+        # Obtener el horario creado por ID
+        db_schedule = await schedule_crud.get_by_device_name_and_id(
+            schedule_request.device_name, schedule_id
         )
 
         if not db_schedule:
@@ -305,6 +313,8 @@ async def create_or_update_schedule(
 
         return build_schedule_response(db_schedule)
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error al procesar el horario: {str(e)}"
@@ -540,12 +550,22 @@ async def get_schedule(device_name: str, api_key_valid: None = Depends(verify_ap
 
 
 @router.get("/", response_model=List[ScheduleResponse])
-async def get_all_schedules_endpoint(api_key_valid: None = Depends(verify_api_key)):
+async def get_all_schedules_endpoint(
+    include_inactive: bool = Query(
+        False,
+        alias="includeInactive",
+        description="Include schedules that have ended (past end_date)"
+    ),
+    api_key_valid: None = Depends(verify_api_key)
+):
     """
-    Obtener todos los horarios registrados.
+    Obtener todos los horarios.
+
+    Por defecto, devuelve solo los horarios actualmente activos (uno por dispositivo).
+    Usa includeInactive=true para ver todos los horarios incluyendo los pasados.
     """
     try:
-        db_schedules = await schedule_crud.get_all()
+        db_schedules = await schedule_crud.get_all(include_inactive=include_inactive)
         return [build_schedule_response(db_schedule) for db_schedule in db_schedules]
 
     except Exception as e:
@@ -556,26 +576,122 @@ async def get_all_schedules_endpoint(api_key_valid: None = Depends(verify_api_ke
 
 @router.delete("/{device_name}", response_model=ScheduleDeleteResponse)
 async def delete_schedule_endpoint(
-    device_name: str, api_key_valid: None = Depends(verify_api_key)
+    device_name: str,
+    schedule_id: Optional[int] = Query(
+        None,
+        alias="scheduleId",
+        description="Specific schedule ID to delete. If not provided, deletes ALL schedules for device."
+    ),
+    api_key_valid: None = Depends(verify_api_key)
 ):
     """
-    Eliminar el horario de un dispositivo específico.
+    Eliminar horario(s) de un dispositivo.
+
+    Query Parameters:
+    - scheduleId: ID específico del horario a eliminar
+
+    Comportamiento:
+    - Con scheduleId: Elimina solo ese horario específico
+    - Sin scheduleId: Elimina TODOS los horarios del dispositivo (usar con precaución!)
     """
     try:
-        deleted = await schedule_crud.delete_by_device_name(device_name)
+        deleted = await schedule_crud.delete_by_device_name(device_name, schedule_id)
 
         if not deleted:
             raise HTTPException(status_code=404, detail="Horario no encontrado")
 
-        return ScheduleDeleteResponse(
-            message=f"Horario del dispositivo {device_name} eliminado correctamente"
-        )
+        if schedule_id:
+            message = f"Horario {schedule_id} del dispositivo {device_name} eliminado correctamente"
+        else:
+            message = f"Todos los horarios del dispositivo {device_name} eliminados correctamente"
+
+        return ScheduleDeleteResponse(message=message)
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error al eliminar el horario: {str(e)}"
+        )
+
+
+@router.get("/{device_name}/history", response_model=List[ScheduleResponse])
+async def get_device_schedule_history(
+    device_name: str,
+    include_past: bool = Query(
+        False,
+        alias="includePast",
+        description="Include schedules that have ended"
+    ),
+    api_key_valid: None = Depends(verify_api_key)
+):
+    """
+    Obtener todas las configuraciones de horarios para un dispositivo.
+
+    Devuelve todos los horarios para este dispositivo ordenados por start_date (más reciente primero).
+    Útil para ver el historial de horarios y planificar cambios futuros.
+
+    Query Parameters:
+    - includePast: boolean (default: false) - Incluir horarios que ya finalizaron
+    """
+    try:
+        db_schedules = await schedule_crud.get_all_by_device_name(
+            device_name, include_past=include_past
+        )
+
+        if not db_schedules:
+            return []
+
+        return [build_schedule_response(db_schedule) for db_schedule in db_schedules]
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener historial de horarios: {str(e)}"
+        )
+
+
+@router.get("/{device_name}/on-date/{date}", response_model=Optional[ScheduleResponse])
+async def get_schedule_on_date(
+    device_name: str,
+    date: str,
+    api_key_valid: None = Depends(verify_api_key)
+):
+    """
+    Obtener el horario activo para un dispositivo en una fecha específica.
+
+    Útil para verificar horarios históricos o planificar cambios futuros.
+
+    Path Parameters:
+    - device_name: Identificador del dispositivo
+    - date: Fecha en formato ISO (YYYY-MM-DD)
+    """
+    try:
+        # Validar formato de fecha
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+            raise HTTPException(
+                status_code=400,
+                detail="Formato de fecha inválido. Usar YYYY-MM-DD"
+            )
+
+        from datetime import datetime as dt
+        date_obj = dt.strptime(date, "%Y-%m-%d").date()
+
+        db_schedule = await schedule_crud.get_schedule_for_device_on_date(
+            device_name, date_obj
+        )
+
+        if not db_schedule:
+            return None
+
+        return build_schedule_response(db_schedule)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener horario para la fecha: {str(e)}"
         )
 
 

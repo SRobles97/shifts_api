@@ -11,6 +11,115 @@ dotenv.load_dotenv()
 conn_pool: Optional[asyncpg.Pool] = None
 
 
+async def migrate_schedules_table(conn: asyncpg.Connection):
+    """
+    Migrar la tabla schedules para agregar soporte de rangos de fechas.
+
+    Esta función agrega las columnas start_date y end_date a tablas existentes,
+    migra los datos existentes, y configura las restricciones e índices necesarios.
+
+    Args:
+        conn (asyncpg.Connection): Conexión activa a la base de datos
+    """
+    try:
+        # Verificar si start_date ya existe
+        start_date_exists = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'schedules' AND column_name = 'start_date'
+            );
+            """
+        )
+
+        if start_date_exists:
+            logger.info("Migración de rangos de fechas ya aplicada.")
+            return
+
+        logger.info("Iniciando migración para soporte de rangos de fechas...")
+
+        # Paso 1: Agregar columnas (nullable primero)
+        await conn.execute(
+            "ALTER TABLE schedules ADD COLUMN IF NOT EXISTS start_date DATE;"
+        )
+        await conn.execute(
+            "ALTER TABLE schedules ADD COLUMN IF NOT EXISTS end_date DATE;"
+        )
+        logger.info("Columnas start_date y end_date agregadas.")
+
+        # Paso 2: Migrar datos existentes
+        await conn.execute(
+            "UPDATE schedules SET start_date = created_at::date WHERE start_date IS NULL;"
+        )
+        logger.info("Datos existentes migrados (start_date = created_at).")
+
+        # Paso 3: Hacer start_date NOT NULL
+        await conn.execute(
+            "ALTER TABLE schedules ALTER COLUMN start_date SET NOT NULL;"
+        )
+        await conn.execute(
+            "ALTER TABLE schedules ALTER COLUMN start_date SET DEFAULT CURRENT_DATE;"
+        )
+        logger.info("Columna start_date configurada como NOT NULL con default.")
+
+        # Paso 4: Agregar constraint de validación de rango
+        await conn.execute(
+            """
+            ALTER TABLE schedules ADD CONSTRAINT schedules_date_range_check
+            CHECK (end_date IS NULL OR end_date >= start_date);
+            """
+        )
+        logger.info("Constraint de validación de rango agregado.")
+
+        # Paso 5: Eliminar constraint UNIQUE en device_name
+        try:
+            await conn.execute(
+                "ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_device_name_key;"
+            )
+            logger.info("Constraint UNIQUE en device_name eliminado.")
+        except Exception as e:
+            logger.warning(f"No se pudo eliminar constraint UNIQUE: {e}")
+
+        # Paso 6: Agregar extensión btree_gist y constraint de exclusión
+        try:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS btree_gist;")
+            await conn.execute(
+                """
+                ALTER TABLE schedules ADD CONSTRAINT schedules_no_overlap
+                EXCLUDE USING GIST (
+                    device_name WITH =,
+                    daterange(start_date, COALESCE(end_date, '9999-12-31'::date), '[]') WITH &&
+                );
+                """
+            )
+            logger.info("Constraint de exclusión para prevenir solapamientos agregado.")
+        except Exception as e:
+            logger.warning(f"No se pudo agregar constraint de exclusión: {e}")
+            logger.info("Continuando sin constraint de exclusión (validación manual requerida).")
+
+        # Paso 7: Agregar índices para consultas de rangos de fechas
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_schedules_device_date_range
+            ON schedules (device_name, start_date, end_date);
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_schedules_active
+            ON schedules (device_name, start_date)
+            WHERE end_date IS NULL OR end_date >= CURRENT_DATE;
+            """
+        )
+        logger.info("Índices para rangos de fechas creados correctamente.")
+
+        logger.info("Migración completada exitosamente.")
+
+    except Exception as e:
+        logger.error(f"Error durante la migración de rangos de fechas: {e}")
+        raise
+
+
 async def init_db():
     """
     Inicializa la conexión a PostgreSQL/TimescaleDB y configura el esquema de base de datos.
@@ -72,17 +181,19 @@ async def init_db():
                         day_schedules       JSONB       NOT NULL,     -- Horarios por día (formato JSON)
                         extra_hours         JSONB       NULL,         -- Horas extra por día (formato JSON)
                         special_days        JSONB       NULL,         -- Días especiales con horarios personalizados
+                        start_date          DATE        NOT NULL DEFAULT CURRENT_DATE,  -- Fecha de inicio del horario
+                        end_date            DATE        NULL,         -- Fecha de fin del horario (NULL = indefinido)
                         created_at          TIMESTAMPTZ DEFAULT NOW(),-- Fecha de creación (UTC)
                         updated_at          TIMESTAMPTZ DEFAULT NOW(),-- Fecha de última actualización (UTC)
                         version             TEXT        DEFAULT '1.0',-- Versión del horario
                         source              TEXT        DEFAULT 'api',-- Fuente del horario
 
-                        UNIQUE(device_name)  -- Un horario por dispositivo
+                        CHECK (end_date IS NULL OR end_date >= start_date)  -- Validación de rango de fechas
                     );
                     """
                 )
                 logger.info(
-                    "Tabla 'schedules' creada correctamente con clave primaria única."
+                    "Tabla 'schedules' creada correctamente con soporte para rangos de fechas."
                 )
 
                 # Add GIN index for special_days JSONB queries
@@ -95,6 +206,9 @@ async def init_db():
                 logger.info("Índice GIN creado para special_days.")
             else:
                 logger.info("Tabla 'schedules' ya existe.")
+
+                # Migrate existing table to add date range support
+                await migrate_schedules_table(conn)
 
             # Configurar optimizaciones específicas de TimescaleDB
             await setup_timescaledb(conn)

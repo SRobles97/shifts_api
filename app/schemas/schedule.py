@@ -5,10 +5,11 @@ This module contains Pydantic models used for request/response serialization
 in the schedule API endpoints. These are separate from business logic models.
 """
 
-from pydantic import BaseModel, Field, AliasChoices
+from pydantic import BaseModel, Field, AliasChoices, field_validator
 from pydantic.config import ConfigDict
+from pydantic_core.core_schema import ValidationInfo
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, date as date_type
 
 
 class WorkHoursSchema(BaseModel):
@@ -146,7 +147,31 @@ class ScheduleCreateRequest(BaseModel):
         serialization_alias="specialDays",
         description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
     )
+    # Acepta startDate y start_date
+    start_date: date_type = Field(
+        default_factory=date_type.today,
+        validation_alias=AliasChoices("startDate", "start_date"),
+        serialization_alias="startDate",
+        description="Date when schedule becomes effective (defaults to today)",
+    )
+    # Acepta endDate y end_date
+    end_date: Optional[date_type] = Field(
+        None,
+        validation_alias=AliasChoices("endDate", "end_date"),
+        serialization_alias="endDate",
+        description="Date when schedule ends (null = indefinite)",
+    )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+
+    @field_validator("end_date")
+    @classmethod
+    def validate_end_date(cls, v: Optional[date_type], info: ValidationInfo) -> Optional[date_type]:
+        """Ensure end_date is after or equal to start_date."""
+        start_date = info.data.get("start_date")
+        if v is not None and start_date is not None:
+            if v < start_date:
+                raise ValueError("endDate must be >= startDate")
+        return v
 
     # Clave para permitir poblar por nombre del campo o por alias
     model_config = ConfigDict(populate_by_name=True)
@@ -167,6 +192,16 @@ class ScheduleResponse(BaseModel):
     )
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
         None, serialization_alias="specialDays", description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
+    )
+    start_date: date_type = Field(
+        ...,
+        serialization_alias="startDate",
+        description="Date when schedule becomes effective"
+    )
+    end_date: Optional[date_type] = Field(
+        None,
+        serialization_alias="endDate",
+        description="Date when schedule ends (null = indefinite)"
     )
     metadata: MetadataSchema = Field(..., description="Schedule metadata")
 
@@ -200,7 +235,31 @@ class ScheduleUpdateRequest(BaseModel):
         serialization_alias="specialDays",
         description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
     )
+    # Acepta startDate y start_date
+    start_date: date_type = Field(
+        ...,
+        validation_alias=AliasChoices("startDate", "start_date"),
+        serialization_alias="startDate",
+        description="Date when schedule becomes effective",
+    )
+    # Acepta endDate y end_date
+    end_date: Optional[date_type] = Field(
+        None,
+        validation_alias=AliasChoices("endDate", "end_date"),
+        serialization_alias="endDate",
+        description="Date when schedule ends (null = indefinite)",
+    )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+
+    @field_validator("end_date")
+    @classmethod
+    def validate_end_date(cls, v: Optional[date_type], info: ValidationInfo) -> Optional[date_type]:
+        """Ensure end_date is after or equal to start_date."""
+        start_date = info.data.get("start_date")
+        if v is not None and start_date is not None:
+            if v < start_date:
+                raise ValueError("endDate must be >= startDate")
+        return v
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -224,6 +283,20 @@ class SchedulePatchRequest(BaseModel):
         validation_alias=AliasChoices("specialDays", "special_days"),
         serialization_alias="specialDays",
         description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+    )
+    # Acepta startDate y start_date
+    start_date: Optional[date_type] = Field(
+        None,
+        validation_alias=AliasChoices("startDate", "start_date"),
+        serialization_alias="startDate",
+        description="Date when schedule becomes effective",
+    )
+    # Acepta endDate y end_date
+    end_date: Optional[date_type] = Field(
+        None,
+        validation_alias=AliasChoices("endDate", "end_date"),
+        serialization_alias="endDate",
+        description="Date when schedule ends (null = indefinite)",
     )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 

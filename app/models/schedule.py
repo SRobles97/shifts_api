@@ -338,6 +338,14 @@ class ScheduleEntity(BaseModel):
     special_days: Optional[Dict[str, SpecialDay]] = Field(
         None, description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
     )
+    start_date: date_type = Field(
+        default_factory=date_type.today,
+        description="Date when this schedule configuration becomes effective"
+    )
+    end_date: Optional[date_type] = Field(
+        None,
+        description="Date when this schedule configuration ends (None = indefinite)"
+    )
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     version: str = Field(default="1.0", description="Schedule version")
@@ -350,6 +358,16 @@ class ScheduleEntity(BaseModel):
         if not v or not v.strip():
             raise ValueError("Device name cannot be empty")
         return v.strip()
+
+    @field_validator("end_date")
+    @classmethod
+    def validate_end_date(cls, v: Optional[date_type], info: ValidationInfo) -> Optional[date_type]:
+        """Ensure end_date is after or equal to start_date."""
+        start_date = info.data.get("start_date")
+        if v is not None and start_date is not None:
+            if v < start_date:
+                raise ValueError("end_date must be >= start_date")
+        return v
 
     @field_validator("extra_hours")
     @classmethod
@@ -491,3 +509,46 @@ class ScheduleEntity(BaseModel):
         # Priority 3: Fall back to regular weekday schedule
         weekday = target_date.strftime("%A").lower()
         return self.schedule.day_schedules.get(weekday)
+
+    def is_active_on_date(self, target_date: date_type) -> bool:
+        """
+        Check if this schedule is active on a specific date.
+
+        Args:
+            target_date: The date to check
+
+        Returns:
+            True if schedule is active on the date, False otherwise
+        """
+        if target_date < self.start_date:
+            return False
+        if self.end_date is not None and target_date > self.end_date:
+            return False
+        return True
+
+    def is_currently_active(self) -> bool:
+        """
+        Check if this schedule is currently active.
+
+        Returns:
+            True if schedule is active today, False otherwise
+        """
+        return self.is_active_on_date(date_type.today())
+
+    def overlaps_with(self, start: date_type, end: Optional[date_type]) -> bool:
+        """
+        Check if this schedule overlaps with another date range.
+
+        Args:
+            start: Start date of the other range
+            end: End date of the other range (None = indefinite)
+
+        Returns:
+            True if ranges overlap, False otherwise
+        """
+        # Convert None to far future for comparison
+        self_end = self.end_date if self.end_date else date_type(9999, 12, 31)
+        other_end = end if end else date_type(9999, 12, 31)
+
+        # Check for overlap: ranges overlap if start1 <= end2 AND start2 <= end1
+        return self.start_date <= other_end and start <= self_end
