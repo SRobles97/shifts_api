@@ -369,9 +369,8 @@ async def update_schedule(
                 }
             )
 
-        # Preparar datos para la base de datos (igual que en POST)
-        schedule_data = {
-            "device_name": device_name,
+        # Preparar datos para la base de datos
+        update_data = {
             "day_schedules": json.dumps(day_schedules_json),
             "extra_hours": (
                 json.dumps(
@@ -384,6 +383,8 @@ async def update_schedule(
                 else None
             ),
             "special_days": special_days_json,
+            "start_date": schedule_request.start_date,
+            "end_date": schedule_request.end_date,
             "version": (
                 schedule_request.metadata.version
                 if schedule_request.metadata
@@ -394,8 +395,8 @@ async def update_schedule(
             ),
         }
 
-        # Actualizar horario
-        await schedule_crud.create_or_update(schedule_data)
+        # Actualizar horario existente
+        await schedule_crud.partial_update(device_name, existing_schedule["id"], update_data)
 
         # Obtener el horario actualizado
         db_schedule = await schedule_crud.get_by_device_name(device_name)
@@ -476,7 +477,7 @@ async def patch_schedule(
                 update_data["source"] = patch_request.metadata.source
 
         # Actualizar solo los campos especificados
-        updated = await schedule_crud.partial_update(device_name, update_data)
+        updated = await schedule_crud.partial_update(device_name, existing_schedule["id"], update_data)
         if not updated:
             raise HTTPException(status_code=404, detail="Horario no encontrado")
 

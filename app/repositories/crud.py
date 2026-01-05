@@ -230,10 +230,10 @@ class ScheduleCRUD:
             param_idx = 3  # $1 is device_name, $2 is schedule_id
 
             for field, value in update_data.items():
-                if value is not None:
-                    update_fields.append(f"{field} = ${param_idx}")
-                    values.append(value)
-                    param_idx += 1
+                # Include all fields, even if value is None (to support setting to NULL)
+                update_fields.append(f"{field} = ${param_idx}")
+                values.append(value)
+                param_idx += 1
 
             if not update_fields:
                 return True  # No updates needed
