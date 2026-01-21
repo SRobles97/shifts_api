@@ -18,7 +18,10 @@ class ScheduleCRUD:
     """CRUD operations for schedule management."""
 
     @staticmethod
-    async def create_or_update(schedule_data: Dict[str, Any]) -> int:
+    async def create_or_update(
+        schedule_data: Dict[str, Any],
+        auto_close_existing: bool = False
+    ) -> int:
         """
         Create a new schedule for a device with date range support.
 
@@ -27,16 +30,18 @@ class ScheduleCRUD:
 
         Validation:
         - Checks for overlapping date ranges
-        - Prevents creating schedules with invalid date ranges
+        - Prevents creating schedules with invalid date ranges (unless auto_close_existing is True)
 
         Args:
             schedule_data: Dictionary containing schedule information including start_date and end_date
+            auto_close_existing: If True, automatically close overlapping schedules by setting their
+                               end_date to the day before the new schedule's start_date
 
         Returns:
             ID of the created schedule
 
         Raises:
-            ValueError: If date range overlaps with existing schedule
+            ValueError: If date range overlaps with existing schedule (and auto_close_existing is False)
             Exception: If database operation fails
         """
         pool = await get_postgres()
@@ -56,11 +61,43 @@ class ScheduleCRUD:
             overlapping = await conn.fetch(overlap_check, device_name, start_date, end_date)
 
             if overlapping:
-                # Format error message with conflicting ranges
-                conflicts = [f"{r['start_date']} to {r['end_date'] or 'indefinite'}" for r in overlapping]
-                raise ValueError(
-                    f"Date range overlaps with existing schedule(s): {', '.join(conflicts)}"
-                )
+                if auto_close_existing:
+                    # Auto-close overlapping schedules by setting end_date to day before new start
+                    from datetime import timedelta
+                    new_end_date = start_date - timedelta(days=1)
+
+                    for schedule in overlapping:
+                        # Only update if the schedule starts before our new start date
+                        if schedule["start_date"] < start_date:
+                            await conn.execute(
+                                """
+                                UPDATE schedules
+                                SET end_date = $1, updated_at = NOW()
+                                WHERE id = $2
+                                """,
+                                new_end_date,
+                                schedule["id"]
+                            )
+                            logger.info(
+                                f"Auto-closed schedule {schedule['id']} for device {device_name} "
+                                f"(new end_date: {new_end_date})"
+                            )
+                        else:
+                            # Schedule starts on or after our new start, delete it
+                            await conn.execute(
+                                "DELETE FROM schedules WHERE id = $1",
+                                schedule["id"]
+                            )
+                            logger.info(
+                                f"Auto-deleted overlapping schedule {schedule['id']} for device {device_name} "
+                                f"(started on {schedule['start_date']})"
+                            )
+                else:
+                    # Format error message with conflicting ranges
+                    conflicts = [f"{r['start_date']} to {r['end_date'] or 'indefinite'}" for r in overlapping]
+                    raise ValueError(
+                        f"Date range overlaps with existing schedule(s): {', '.join(conflicts)}"
+                    )
 
             # Insert new schedule
             result = await conn.fetchval(

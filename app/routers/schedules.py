@@ -233,9 +233,78 @@ async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
         )
 
 
+# ========== Documentation Endpoints (must be before /{device_name} routes) ==========
+
+
+@router.get("/openapi.json", include_in_schema=False)
+async def get_schedules_openapi():
+    """
+    Get OpenAPI JSON schema for schedules API only.
+
+    Generates OpenAPI spec with correct /shifts-api/v1/schedules prefix.
+    """
+    # Generate base OpenAPI from router routes
+    openapi_schema = get_openapi(
+        title="Shifts API - Schedule Management",
+        version="1.0.0",
+        description="API for managing work schedules and shifts for devices",
+        routes=router.routes,
+    )
+
+    # Add the correct prefix to all paths
+    # Router already has /schedules prefix, so we only add /shifts-api/v1
+    prefix = "/shifts-api/v1"
+    prefixed_paths = {}
+    for path, path_item in openapi_schema.get("paths", {}).items():
+        # Skip the docs/redoc/openapi endpoints themselves
+        if path in ["/schedules/docs", "/schedules/redoc", "/schedules/openapi.json"]:
+            continue
+        prefixed_paths[f"{prefix}{path}"] = path_item
+
+    openapi_schema["paths"] = prefixed_paths
+    return openapi_schema
+
+
+@router.get("/docs", include_in_schema=False)
+async def get_schedules_docs():
+    """
+    Get Swagger UI documentation for schedules API.
+
+    This provides interactive API documentation specifically for schedule endpoints.
+    """
+    return get_swagger_ui_html(
+        openapi_url="/shifts-api/v1/schedules/openapi.json",
+        title="Shifts API - Swagger UI",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+    )
+
+
+@router.get("/redoc", include_in_schema=False)
+async def get_schedules_redoc():
+    """
+    Get ReDoc documentation for schedules API.
+
+    This provides clean, readable API documentation specifically for schedule endpoints.
+    """
+    return get_redoc_html(
+        openapi_url="/shifts-api/v1/schedules/openapi.json",
+        title="Shifts API - ReDoc",
+        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2.1.0/bundles/redoc.standalone.js",
+    )
+
+
+# ========== Schedule CRUD Endpoints ==========
+
+
 @router.post("/", response_model=ScheduleResponse)
 async def create_or_update_schedule(
     schedule_request: ScheduleCreateRequest,
+    auto_close: bool = Query(
+        False,
+        alias="autoClose",
+        description="If true, automatically close overlapping schedules by setting their end_date to the day before this schedule's start_date"
+    ),
     api_key_valid: None = Depends(verify_api_key),
 ):
     """
@@ -243,6 +312,10 @@ async def create_or_update_schedule(
 
     Recibe el JSON completo del horario y lo almacena en la base de datos.
     El ID se genera automáticamente y extraHours puede ser null.
+
+    Query Parameters:
+    - autoClose: Si es true, cierra automáticamente los horarios existentes que se solapan
+                 estableciendo su end_date al día anterior al start_date del nuevo horario.
     """
     try:
         # Convert day schedules to JSONB format
@@ -298,7 +371,9 @@ async def create_or_update_schedule(
 
         # Crear horario (returns schedule ID)
         try:
-            schedule_id = await schedule_crud.create_or_update(schedule_data)
+            schedule_id = await schedule_crud.create_or_update(
+                schedule_data, auto_close_existing=auto_close
+            )
         except ValueError as e:
             # Date range overlap error
             raise HTTPException(status_code=400, detail=str(e))
@@ -1074,50 +1149,3 @@ async def get_active_devices_on_date(
             status_code=500,
             detail=f"Error al obtener dispositivos activos: {str(e)}",
         )
-
-
-# ========== Documentation Endpoints ==========
-
-
-@router.get("/docs", include_in_schema=False)
-async def get_schedules_docs():
-    """
-    Get Swagger UI documentation for schedules API.
-
-    This provides interactive API documentation specifically for schedule endpoints.
-    """
-    return get_swagger_ui_html(
-        openapi_url="/schedules/openapi.json",
-        title="Schedules API - Swagger UI",
-        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
-        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
-    )
-
-
-@router.get("/redoc", include_in_schema=False)
-async def get_schedules_redoc():
-    """
-    Get ReDoc documentation for schedules API.
-
-    This provides clean, readable API documentation specifically for schedule endpoints.
-    """
-    return get_redoc_html(
-        openapi_url="/schedules/openapi.json",
-        title="Schedules API - ReDoc",
-        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2.1.0/bundles/redoc.standalone.js",
-    )
-
-
-@router.get("/openapi.json", include_in_schema=False)
-async def get_schedules_openapi():
-    """
-    Get OpenAPI JSON schema for schedules API.
-
-    This provides the OpenAPI specification specifically for schedule endpoints.
-    """
-    return get_openapi(
-        title="Schedules API",
-        version="1.0.0",
-        description="API for managing work schedules and shifts with statistics",
-        routes=router.routes,
-    )
