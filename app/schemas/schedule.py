@@ -3,13 +3,18 @@ API schemas for schedule endpoints.
 
 This module contains Pydantic models used for request/response serialization
 in the schedule API endpoints. These are separate from business logic models.
+
+Naming convention:
+- ScheduleCreate: POST request body
+- ScheduleUpdate: PUT request body (full replacement, device_id from URL)
+- SchedulePatch: PATCH request body (partial update, all fields optional)
+- ScheduleRead: Response body
 """
 
 from pydantic import BaseModel, Field, AliasChoices, field_validator
 from pydantic.config import ConfigDict
-from pydantic_core.core_schema import ValidationInfo
 from typing import List, Optional, Dict
-from datetime import datetime, date as date_type
+from datetime import datetime
 
 
 class WorkHoursSchema(BaseModel):
@@ -18,7 +23,6 @@ class WorkHoursSchema(BaseModel):
     start: str = Field(..., description="Start time in HH:MM format")
     end: str = Field(..., description="End time in HH:MM format")
 
-    # Permite poblar por nombre de campo
     model_config = ConfigDict(populate_by_name=True)
 
 
@@ -26,7 +30,6 @@ class BreakSchema(BaseModel):
     """Schema for break information in API requests/responses."""
 
     start: str = Field(..., description="Break start time in HH:MM format")
-    # Acepta durationMinutes (camel) y duration_minutes (snake).
     duration_minutes: int = Field(
         ...,
         validation_alias=AliasChoices("durationMinutes", "duration_minutes"),
@@ -40,14 +43,12 @@ class BreakSchema(BaseModel):
 class DayScheduleSchema(BaseModel):
     """Schema for a single day's schedule configuration."""
 
-    # Acepta workHours y work_hours
     work_hours: WorkHoursSchema = Field(
         ...,
         validation_alias=AliasChoices("workHours", "work_hours"),
         serialization_alias="workHours",
         description="Work hours for this day",
     )
-    # Acepta "break" (camel) y "break_time" (snake)
     break_time: BreakSchema = Field(
         ...,
         validation_alias=AliasChoices("break", "break_time"),
@@ -106,7 +107,6 @@ class SpecialDaySchema(BaseModel):
 class MetadataSchema(BaseModel):
     """Schema for schedule metadata."""
 
-    # Acepta createdAt y created_at
     created_at: Optional[datetime] = Field(
         None,
         validation_alias=AliasChoices("createdAt", "created_at"),
@@ -114,75 +114,103 @@ class MetadataSchema(BaseModel):
         description="Creation timestamp",
     )
     version: str = Field(default="1.0", description="Schedule version")
-    source: str = Field(default="api", description="Schedule source")
+    source: str = Field(default="ui", description="Schedule source")
 
     model_config = ConfigDict(populate_by_name=True)
 
 
-class ScheduleCreateRequest(BaseModel):
-    """Schema for creating/updating schedule requests."""
+# ========== Request Schemas ==========
 
-    # Acepta deviceName y device_name
-    device_name: str = Field(
+
+class ScheduleCreate(BaseModel):
+    """Schema for creating a schedule (POST)."""
+
+    device_id: int = Field(
         ...,
-        validation_alias=AliasChoices("deviceName", "device_name"),
-        serialization_alias="deviceName",
-        description="Device name",
+        validation_alias=AliasChoices("deviceId", "device_id"),
+        serialization_alias="deviceId",
+        description="Device ID (FK to devices table)",
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ...,
         description="Schedule configuration by day (e.g., {'monday': {...}, 'tuesday': {...}})",
     )
-    # Acepta extraHours y extra_hours
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
         None,
         validation_alias=AliasChoices("extraHours", "extra_hours"),
         serialization_alias="extraHours",
         description="Extra hours by day of week",
     )
-    # Acepta specialDays y special_days
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
         None,
         validation_alias=AliasChoices("specialDays", "special_days"),
         serialization_alias="specialDays",
         description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
     )
-    # Acepta startDate y start_date
-    start_date: date_type = Field(
-        default_factory=date_type.today,
-        validation_alias=AliasChoices("startDate", "start_date"),
-        serialization_alias="startDate",
-        description="Date when schedule becomes effective (defaults to today)",
-    )
-    # Acepta endDate y end_date
-    end_date: Optional[date_type] = Field(
-        None,
-        validation_alias=AliasChoices("endDate", "end_date"),
-        serialization_alias="endDate",
-        description="Date when schedule ends (null = indefinite)",
-    )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 
-    @field_validator("end_date")
+    @field_validator("device_id")
     @classmethod
-    def validate_end_date(cls, v: Optional[date_type], info: ValidationInfo) -> Optional[date_type]:
-        """Ensure end_date is after or equal to start_date."""
-        start_date = info.data.get("start_date")
-        if v is not None and start_date is not None:
-            if v < start_date:
-                raise ValueError("endDate must be >= startDate")
+    def validate_device_id(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("deviceId must be a positive integer")
         return v
 
-    # Clave para permitir poblar por nombre del campo o por alias
     model_config = ConfigDict(populate_by_name=True)
 
 
-class ScheduleResponse(BaseModel):
+class ScheduleUpdate(BaseModel):
+    """Schema for full schedule replacement (PUT). device_id comes from URL."""
+
+    schedule: Dict[str, DayScheduleSchema] = Field(
+        ..., description="Schedule configuration by day"
+    )
+    extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
+        None,
+        validation_alias=AliasChoices("extraHours", "extra_hours"),
+        serialization_alias="extraHours",
+        description="Extra hours by day of week",
+    )
+    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
+        None,
+        validation_alias=AliasChoices("specialDays", "special_days"),
+        serialization_alias="specialDays",
+        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+    )
+    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SchedulePatch(BaseModel):
+    """Schema for partial schedule updates (PATCH). All fields optional."""
+
+    schedule: Optional[Dict[str, DayScheduleSchema]] = Field(
+        None, description="Schedule configuration by day"
+    )
+    extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
+        None,
+        validation_alias=AliasChoices("extraHours", "extra_hours"),
+        serialization_alias="extraHours",
+        description="Extra hours by day of week",
+    )
+    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
+        None,
+        validation_alias=AliasChoices("specialDays", "special_days"),
+        serialization_alias="specialDays",
+        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+    )
+    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ScheduleRead(BaseModel):
     """Schema for schedule API responses."""
 
     id: str = Field(..., description="Unique schedule ID")
-    device_name: str = Field(
-        ..., serialization_alias="deviceName", description="Device name"
+    device_id: int = Field(
+        ..., serialization_alias="deviceId", description="Device ID"
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ..., description="Schedule configuration by day"
@@ -193,112 +221,7 @@ class ScheduleResponse(BaseModel):
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
         None, serialization_alias="specialDays", description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
     )
-    start_date: date_type = Field(
-        ...,
-        serialization_alias="startDate",
-        description="Date when schedule becomes effective"
-    )
-    end_date: Optional[date_type] = Field(
-        None,
-        serialization_alias="endDate",
-        description="Date when schedule ends (null = indefinite)"
-    )
     metadata: MetadataSchema = Field(..., description="Schedule metadata")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ScheduleUpdateRequest(BaseModel):
-    """Schema for updating complete schedule via PUT."""
-
-    # Acepta deviceName y device_name
-    device_name: str = Field(
-        ...,
-        validation_alias=AliasChoices("deviceName", "device_name"),
-        serialization_alias="deviceName",
-        description="Device name",
-    )
-    schedule: Dict[str, DayScheduleSchema] = Field(
-        ..., description="Schedule configuration by day"
-    )
-    # Acepta extraHours y extra_hours
-    extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
-        None,
-        validation_alias=AliasChoices("extraHours", "extra_hours"),
-        serialization_alias="extraHours",
-        description="Extra hours by day of week",
-    )
-    # Acepta specialDays y special_days
-    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
-        None,
-        validation_alias=AliasChoices("specialDays", "special_days"),
-        serialization_alias="specialDays",
-        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
-    )
-    # Acepta startDate y start_date
-    start_date: date_type = Field(
-        ...,
-        validation_alias=AliasChoices("startDate", "start_date"),
-        serialization_alias="startDate",
-        description="Date when schedule becomes effective",
-    )
-    # Acepta endDate y end_date
-    end_date: Optional[date_type] = Field(
-        None,
-        validation_alias=AliasChoices("endDate", "end_date"),
-        serialization_alias="endDate",
-        description="Date when schedule ends (null = indefinite)",
-    )
-    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
-
-    @field_validator("end_date")
-    @classmethod
-    def validate_end_date(cls, v: Optional[date_type], info: ValidationInfo) -> Optional[date_type]:
-        """Ensure end_date is after or equal to start_date."""
-        start_date = info.data.get("start_date")
-        if v is not None and start_date is not None:
-            if v < start_date:
-                raise ValueError("endDate must be >= startDate")
-        return v
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class SchedulePatchRequest(BaseModel):
-    """Schema for partial schedule updates via PATCH."""
-
-    schedule: Optional[Dict[str, DayScheduleSchema]] = Field(
-        None, description="Schedule configuration by day"
-    )
-    # Acepta extraHours y extra_hours
-    extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
-        None,
-        validation_alias=AliasChoices("extraHours", "extra_hours"),
-        serialization_alias="extraHours",
-        description="Extra hours by day of week",
-    )
-    # Acepta specialDays y special_days
-    special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
-        None,
-        validation_alias=AliasChoices("specialDays", "special_days"),
-        serialization_alias="specialDays",
-        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
-    )
-    # Acepta startDate y start_date
-    start_date: Optional[date_type] = Field(
-        None,
-        validation_alias=AliasChoices("startDate", "start_date"),
-        serialization_alias="startDate",
-        description="Date when schedule becomes effective",
-    )
-    # Acepta endDate y end_date
-    end_date: Optional[date_type] = Field(
-        None,
-        validation_alias=AliasChoices("endDate", "end_date"),
-        serialization_alias="endDate",
-        description="Date when schedule ends (null = indefinite)",
-    )
-    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -314,8 +237,8 @@ class ScheduleDeleteResponse(BaseModel):
 class ScheduleStatsSchema(BaseModel):
     """Schema for individual device schedule statistics."""
 
-    device_name: str = Field(
-        ..., serialization_alias="deviceName", description="Device name"
+    device_id: int = Field(
+        ..., serialization_alias="deviceId", description="Device ID"
     )
     schedule_start: str = Field(
         ...,

@@ -213,7 +213,6 @@ class SpecialDay(BaseModel):
         if v and not work_hours:
             raise ValueError("Break cannot be set without work hours")
 
-        # Apply same validation as DaySchedule if both are present
         if v and work_hours:
             work_start_dt = _parse_hhmm(work_hours.start)
             work_end_dt = _parse_hhmm(work_hours.end)
@@ -281,7 +280,6 @@ class Schedule(BaseModel):
         if not v:
             raise ValueError("At least one day schedule is required")
 
-        # Normalize keys to lowercase and validate
         normalized = {}
         for day, schedule in v.items():
             day_lower = day.lower()
@@ -297,21 +295,12 @@ class Schedule(BaseModel):
         return list(self.day_schedules.keys())
 
     def total_work_minutes(self, day: Optional[str] = None) -> int:
-        """
-        Calculate total work minutes excluding break.
-
-        Args:
-            day: Optional day to calculate for. If None, returns total for first day.
-
-        Returns:
-            Total work minutes for the specified day.
-        """
+        """Calculate total work minutes excluding break."""
         if day:
             day_lower = day.lower()
             if day_lower in self.day_schedules:
                 return self.day_schedules[day_lower].total_work_minutes()
             return 0
-        # Return first day's total if no day specified
         if self.day_schedules:
             first_day = list(self.day_schedules.keys())[0]
             return self.day_schedules[first_day].total_work_minutes()
@@ -327,10 +316,11 @@ class ScheduleEntity(BaseModel):
     Complete business entity for a device schedule.
 
     Includes all schedule information plus metadata, extra hours, and special days.
+    One schedule per device (no date ranges).
     """
 
     id: Optional[int] = None
-    device_name: str = Field(..., description="Device identifier")
+    device_id: int = Field(..., description="Device identifier (FK to devices table)")
     schedule: Schedule = Field(..., description="Basic schedule configuration")
     extra_hours: Optional[Dict[str, List[ExtraHour]]] = Field(
         None, description="Extra hours by day of week"
@@ -338,35 +328,17 @@ class ScheduleEntity(BaseModel):
     special_days: Optional[Dict[str, SpecialDay]] = Field(
         None, description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
     )
-    start_date: date_type = Field(
-        default_factory=date_type.today,
-        description="Date when this schedule configuration becomes effective"
-    )
-    end_date: Optional[date_type] = Field(
-        None,
-        description="Date when this schedule configuration ends (None = indefinite)"
-    )
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     version: str = Field(default="1.0", description="Schedule version")
-    source: str = Field(default="api", description="Schedule source")
+    source: str = Field(default="ui", description="Schedule source")
 
-    @field_validator("device_name")
+    @field_validator("device_id")
     @classmethod
-    def validate_device_name(cls, v: str) -> str:
-        """Validate device name is not empty and normalize whitespace."""
-        if not v or not v.strip():
-            raise ValueError("Device name cannot be empty")
-        return v.strip()
-
-    @field_validator("end_date")
-    @classmethod
-    def validate_end_date(cls, v: Optional[date_type], info: ValidationInfo) -> Optional[date_type]:
-        """Ensure end_date is after or equal to start_date."""
-        start_date = info.data.get("start_date")
-        if v is not None and start_date is not None:
-            if v < start_date:
-                raise ValueError("end_date must be >= start_date")
+    def validate_device_id(cls, v: int) -> int:
+        """Validate device_id is positive."""
+        if v <= 0:
+            raise ValueError("device_id must be a positive integer")
         return v
 
     @field_validator("extra_hours")
@@ -378,17 +350,15 @@ class ScheduleEntity(BaseModel):
         if not v:
             return v
 
-        schedule: Schedule = info.data.get("schedule")  # may be None in partial loads
+        schedule: Schedule = info.data.get("schedule")
         valid_days = set(Schedule.VALID_DAYS)
 
-        # Validate day keys
         for day in v.keys():
             if day.lower() not in valid_days:
                 raise ValueError(f"Invalid extra hour day: {day}")
 
-        # If schedule is available, enforce extra_hours only for active_days
         if schedule:
-            active_days_list = schedule.active_days  # Now a property
+            active_days_list = schedule.active_days
             active = set(active_days_list)
             invalid_inactive = [d for d in v.keys() if d.lower() not in active]
             if invalid_inactive:
@@ -396,7 +366,6 @@ class ScheduleEntity(BaseModel):
                     f"Extra hours days must be within active_days: {invalid_inactive}"
                 )
 
-        # Check overlaps within the same day
         for day, blocks in v.items():
             sorted_blocks = sorted(blocks, key=lambda b: _parse_hhmm(b.start))
             last_end: Optional[datetime] = None
@@ -409,7 +378,6 @@ class ScheduleEntity(BaseModel):
                     )
                 last_end = end_dt
 
-        # Normalize keys to lowercase
         return {k.lower(): v[k] for k in v}
 
     @field_validator("special_days")
@@ -421,13 +389,11 @@ class ScheduleEntity(BaseModel):
         if not v:
             return v
 
-        # Validate date format (YYYY-MM-DD) and parseability
         for date_str in v.keys():
             if not _DATE_RE.match(date_str):
                 raise ValueError(
                     f"Invalid date format: {date_str}. Use YYYY-MM-DD format"
                 )
-            # Validate that it's a parseable date
             try:
                 datetime.strptime(date_str, "%Y-%m-%d")
             except ValueError:
@@ -443,7 +409,6 @@ class ScheduleEntity(BaseModel):
 
         total_minutes = self.schedule.total_work_minutes(day_l)
 
-        # Add extra hours for the day
         if self.extra_hours and day_l in self.extra_hours:
             for extra_hour in self.extra_hours[day_l]:
                 total_minutes += extra_hour.duration_minutes()
@@ -465,12 +430,6 @@ class ScheduleEntity(BaseModel):
         1. Special day with exact date match (highest priority)
         2. Recurring special day with month-day match
         3. Regular weekday schedule (lowest priority)
-
-        Args:
-            target_date: The date to get schedule for
-
-        Returns:
-            DaySchedule if there's work scheduled, None if no work (e.g., holiday)
         """
         date_str = target_date.strftime("%Y-%m-%d")
 
@@ -478,7 +437,6 @@ class ScheduleEntity(BaseModel):
         if self.special_days and date_str in self.special_days:
             special = self.special_days[date_str]
             if special.work_hours:
-                # Create DaySchedule from special day
                 break_time = special.break_time if special.break_time else Break(
                     start="12:00", duration_minutes=0
                 )
@@ -486,14 +444,12 @@ class ScheduleEntity(BaseModel):
                     work_hours=special.work_hours,
                     break_time=break_time
                 )
-            # No work on this special day
             return None
 
         # Priority 2: Check recurring special days (match month-day)
         if self.special_days:
             month_day = target_date.strftime("%m-%d")
             for special_date_str, special in self.special_days.items():
-                # Check if this is a recurring special day and month-day matches
                 if special.is_recurring and special_date_str.endswith(month_day):
                     if special.work_hours:
                         break_time = special.break_time if special.break_time else Break(
@@ -503,52 +459,8 @@ class ScheduleEntity(BaseModel):
                             work_hours=special.work_hours,
                             break_time=break_time
                         )
-                    # No work on this recurring special day
                     return None
 
         # Priority 3: Fall back to regular weekday schedule
         weekday = target_date.strftime("%A").lower()
         return self.schedule.day_schedules.get(weekday)
-
-    def is_active_on_date(self, target_date: date_type) -> bool:
-        """
-        Check if this schedule is active on a specific date.
-
-        Args:
-            target_date: The date to check
-
-        Returns:
-            True if schedule is active on the date, False otherwise
-        """
-        if target_date < self.start_date:
-            return False
-        if self.end_date is not None and target_date > self.end_date:
-            return False
-        return True
-
-    def is_currently_active(self) -> bool:
-        """
-        Check if this schedule is currently active.
-
-        Returns:
-            True if schedule is active today, False otherwise
-        """
-        return self.is_active_on_date(date_type.today())
-
-    def overlaps_with(self, start: date_type, end: Optional[date_type]) -> bool:
-        """
-        Check if this schedule overlaps with another date range.
-
-        Args:
-            start: Start date of the other range
-            end: End date of the other range (None = indefinite)
-
-        Returns:
-            True if ranges overlap, False otherwise
-        """
-        # Convert None to far future for comparison
-        self_end = self.end_date if self.end_date else date_type(9999, 12, 31)
-        other_end = end if end else date_type(9999, 12, 31)
-
-        # Check for overlap: ranges overlap if start1 <= end2 AND start2 <= end1
-        return self.start_date <= other_end and start <= self_end
