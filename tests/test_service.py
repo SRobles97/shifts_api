@@ -198,6 +198,62 @@ class TestScheduleServiceCreate:
         assert "monday" in result.schedule
 
 
+class TestScheduleServiceCreateByName:
+    @pytest.mark.asyncio
+    async def test_create_with_device_name(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "deviceName": "1103",
+            "schedule": {
+                "monday": {
+                    "workHours": {"start": "08:00", "end": "17:00"},
+                    "break": {"start": "12:00", "durationMinutes": 60},
+                }
+            },
+        })
+
+        rec = make_db_record(device_id=1, days=["monday"])
+
+        with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+            result = await ScheduleService.create_schedule(pool, data)
+
+        assert result.device_id == 1
+
+    @pytest.mark.asyncio
+    async def test_create_with_device_name_not_found(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "deviceName": "nonexistent",
+            "schedule": {
+                "monday": {
+                    "workHours": {"start": "08:00", "end": "17:00"},
+                    "break": {"start": "12:00", "durationMinutes": 60},
+                }
+            },
+        })
+
+        with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=None):
+            with pytest.raises(LookupError, match="not found"):
+                await ScheduleService.create_schedule(pool, data)
+
+    @pytest.mark.asyncio
+    async def test_create_with_neither_id_nor_name(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "schedule": {
+                "monday": {
+                    "workHours": {"start": "08:00", "end": "17:00"},
+                    "break": {"start": "12:00", "durationMinutes": 60},
+                }
+            },
+        })
+
+        with pytest.raises(ValueError, match="Either deviceId or deviceName"):
+            await ScheduleService.create_schedule(pool, data)
+
+
 class TestScheduleServiceUpdate:
     @pytest.mark.asyncio
     async def test_update_not_found(self):

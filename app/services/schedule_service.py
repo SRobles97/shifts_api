@@ -137,6 +137,7 @@ def _build_schedule_read(db_record: dict) -> ScheduleRead:
     return ScheduleRead(
         id=str(db_record["id"]),
         device_id=db_record["device_id"],
+        device_name=db_record.get("device_name"),
         schedule=day_schedules_dict,
         extra_hours=extra_hours_dict,
         special_days=special_days_dict,
@@ -280,9 +281,27 @@ class ScheduleService:
     """Service layer encapsulating schedule business logic."""
 
     @staticmethod
+    async def _resolve_device_id(pool: asyncpg.Pool, data: ScheduleCreate) -> int:
+        """Resolve device_id from either deviceId or deviceName."""
+        if data.device_id:
+            return data.device_id
+
+        if data.device_name:
+            device_id = await schedule_crud.get_device_id_by_name(pool, data.device_name)
+            if not device_id:
+                raise LookupError(
+                    f"Device with name '{data.device_name}' not found"
+                )
+            return device_id
+
+        raise ValueError("Either deviceId or deviceName must be provided")
+
+    @staticmethod
     async def create_schedule(pool: asyncpg.Pool, data: ScheduleCreate) -> ScheduleRead:
+        device_id = await ScheduleService._resolve_device_id(pool, data)
+
         schedule_data = {
-            "device_id": data.device_id,
+            "device_id": device_id,
             "day_schedules": _serialize_day_schedules(data.schedule),
             "extra_hours": _serialize_extra_hours(data.extra_hours),
             "special_days": _serialize_special_days(data.special_days),
@@ -292,7 +311,7 @@ class ScheduleService:
 
         schedule_id = await schedule_crud.upsert(pool, schedule_data)
 
-        db_record = await schedule_crud.get_by_device_id(pool, data.device_id)
+        db_record = await schedule_crud.get_by_device_id(pool, device_id)
         if not db_record:
             raise RuntimeError("Failed to retrieve created schedule")
 

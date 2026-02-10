@@ -83,6 +83,8 @@ async def create_schedule(
     """Create or upsert a schedule for a device."""
     try:
         return await schedule_service.create_schedule(pool, data)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

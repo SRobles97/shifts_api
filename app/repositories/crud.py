@@ -70,10 +70,12 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             return await conn.fetchrow(
                 """
-                SELECT id, device_id, day_schedules, extra_hours, special_days,
-                       created_at, updated_at, version, source
-                FROM schedules
-                WHERE device_id = $1;
+                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                       s.created_at, s.updated_at, s.version, s.source,
+                       d.device_key AS device_name
+                FROM schedules s
+                LEFT JOIN devices d ON d.id = s.device_id
+                WHERE s.device_id = $1;
                 """,
                 device_id,
             )
@@ -89,10 +91,12 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                SELECT id, device_id, day_schedules, extra_hours, special_days,
-                       created_at, updated_at, version, source
-                FROM schedules
-                ORDER BY device_id;
+                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                       s.created_at, s.updated_at, s.version, s.source,
+                       d.device_key AS device_name
+                FROM schedules s
+                LEFT JOIN devices d ON d.id = s.device_id
+                ORDER BY s.device_id;
                 """
             )
 
@@ -111,11 +115,13 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                SELECT id, device_id, day_schedules, extra_hours, special_days,
-                       created_at, updated_at, version, source
-                FROM schedules
-                WHERE day_schedules ? $1
-                ORDER BY device_id;
+                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                       s.created_at, s.updated_at, s.version, s.source,
+                       d.device_key AS device_name
+                FROM schedules s
+                LEFT JOIN devices d ON d.id = s.device_id
+                WHERE s.day_schedules ? $1
+                ORDER BY s.device_id;
                 """,
                 day,
             )
@@ -212,6 +218,46 @@ class ScheduleCRUD:
             if isinstance(data, str):
                 return json.loads(data)
             return data
+
+
+    @staticmethod
+    async def get_device_id_by_name(pool: asyncpg.Pool, device_name: str) -> Optional[int]:
+        """
+        Look up a device ID by name.
+
+        Searches across device_key, display_name, and device_code
+        to match flexibly (e.g. '1103' matches device_key='1103' or
+        display_name='CNC 1103').
+
+        Returns:
+            Device ID or None if not found
+        """
+        async with pool.acquire() as conn:
+            # Exact match on device_key (most common from frontend)
+            row = await conn.fetchrow(
+                "SELECT id FROM devices WHERE device_key = $1",
+                device_name,
+            )
+            if row:
+                return row["id"]
+
+            # Exact match on display_name
+            row = await conn.fetchrow(
+                "SELECT id FROM devices WHERE display_name = $1",
+                device_name,
+            )
+            if row:
+                return row["id"]
+
+            # Partial match on display_name (e.g. "1103" -> "CNC 1103")
+            row = await conn.fetchrow(
+                "SELECT id FROM devices WHERE display_name ILIKE '%' || $1 || '%'",
+                device_name,
+            )
+            if row:
+                return row["id"]
+
+            return None
 
 
 schedule_crud = ScheduleCRUD()

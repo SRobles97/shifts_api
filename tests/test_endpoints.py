@@ -63,6 +63,44 @@ class TestCreateSchedule:
         assert body["deviceId"] == 1
 
     @pytest.mark.asyncio
+    async def test_create_with_device_name(self, client):
+        rec = make_db_record(device_id=1, days=["monday"])
+        with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+            resp = await client.post(
+                "/",
+                json={
+                    "deviceName": "1103",
+                    "schedule": {
+                        "monday": {
+                            "workHours": {"start": "08:00", "end": "17:00"},
+                            "break": {"start": "12:00", "durationMinutes": 60},
+                        }
+                    },
+                },
+            )
+        assert resp.status_code == 200
+        assert resp.json()["deviceId"] == 1
+
+    @pytest.mark.asyncio
+    async def test_create_device_name_not_found(self, client):
+        with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=None):
+            resp = await client.post(
+                "/",
+                json={
+                    "deviceName": "nonexistent",
+                    "schedule": {
+                        "monday": {
+                            "workHours": {"start": "08:00", "end": "17:00"},
+                            "break": {"start": "12:00", "durationMinutes": 60},
+                        }
+                    },
+                },
+            )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
     async def test_create_invalid_payload(self, client):
         resp = await client.post("/", json={"deviceId": -1, "schedule": {}})
         assert resp.status_code == 422

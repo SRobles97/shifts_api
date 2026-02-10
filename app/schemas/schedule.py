@@ -123,13 +123,24 @@ class MetadataSchema(BaseModel):
 
 
 class ScheduleCreate(BaseModel):
-    """Schema for creating a schedule (POST)."""
+    """Schema for creating a schedule (POST).
 
-    device_id: int = Field(
-        ...,
+    Accepts either ``deviceId`` (int) or ``deviceName`` (str).
+    When ``deviceName`` is provided the service layer resolves it to an ID
+    via the ``devices`` table.
+    """
+
+    device_id: Optional[int] = Field(
+        None,
         validation_alias=AliasChoices("deviceId", "device_id"),
         serialization_alias="deviceId",
         description="Device ID (FK to devices table)",
+    )
+    device_name: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("deviceName", "device_name"),
+        serialization_alias="deviceName",
+        description="Device name — resolved to device_id automatically",
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ...,
@@ -151,8 +162,8 @@ class ScheduleCreate(BaseModel):
 
     @field_validator("device_id")
     @classmethod
-    def validate_device_id(cls, v: int) -> int:
-        if v <= 0:
+    def validate_device_id(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
             raise ValueError("deviceId must be a positive integer")
         return v
 
@@ -211,6 +222,9 @@ class ScheduleRead(BaseModel):
     id: str = Field(..., description="Unique schedule ID")
     device_id: int = Field(
         ..., serialization_alias="deviceId", description="Device ID"
+    )
+    device_name: Optional[str] = Field(
+        None, serialization_alias="deviceName", description="Device name (from devices table)"
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ..., description="Schedule configuration by day"

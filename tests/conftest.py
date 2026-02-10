@@ -64,6 +64,7 @@ def make_db_record(
     special_days: Optional[str] = None,
     version: str = "1.0",
     source: str = "ui",
+    device_name: Optional[str] = "1103",
 ) -> Dict[str, Any]:
     """Create a dict that mimics an asyncpg.Record for a schedule row."""
     now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
@@ -77,6 +78,7 @@ def make_db_record(
         "updated_at": now,
         "version": version,
         "source": source,
+        "device_name": device_name,
     }
 
 
