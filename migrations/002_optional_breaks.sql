@@ -1,0 +1,12 @@
+-- Migration 002: Make breaks optional in day_schedules
+--
+-- No DDL changes required. The "break" key in the day_schedules JSONB column
+-- is now optional. Days without a break simply omit the "break" key (or set
+-- it to null). This is a schema-less change — existing rows with breaks
+-- continue to work as before.
+--
+-- Application changes:
+--   - DaySchedule.break_time is now Optional[Break] (default None)
+--   - DayScheduleSchema.break_time is now Optional[BreakSchema] (default None)
+--   - Service layer handles missing "break" key in JSONB gracefully
+--   - Stats calculation treats missing break as 0 duration

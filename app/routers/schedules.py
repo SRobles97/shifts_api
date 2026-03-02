@@ -2,6 +2,7 @@
 Schedule API router — thin controllers delegating to the service layer.
 """
 
+from datetime import date, datetime
 from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -80,7 +81,7 @@ async def create_schedule(
     pool: asyncpg.Pool = Depends(get_db_pool),
     _: None = Depends(verify_api_key),
 ):
-    """Create or upsert a schedule for a device."""
+    """Create a schedule for a device (auto-closes previous open-ended schedule)."""
     try:
         return await schedule_service.create_schedule(pool, data)
     except LookupError as e:
@@ -95,12 +96,13 @@ async def create_schedule(
 async def update_schedule(
     device_id: int,
     data: ScheduleUpdate,
+    date_param: Optional[date] = Query(None, alias="date", description="Target date (YYYY-MM-DD) to resolve schedule"),
     pool: asyncpg.Pool = Depends(get_db_pool),
     _: None = Depends(verify_api_key),
 ):
     """Full replacement of a schedule for a device."""
     try:
-        return await schedule_service.update_schedule(pool, device_id, data)
+        return await schedule_service.update_schedule(pool, device_id, data, target_date=date_param)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -113,12 +115,13 @@ async def update_schedule(
 async def patch_schedule(
     device_id: int,
     data: SchedulePatch,
+    date_param: Optional[date] = Query(None, alias="date", description="Target date (YYYY-MM-DD) to resolve schedule"),
     pool: asyncpg.Pool = Depends(get_db_pool),
     _: None = Depends(verify_api_key),
 ):
     """Partial update of a schedule for a device."""
     try:
-        return await schedule_service.patch_schedule(pool, device_id, data)
+        return await schedule_service.patch_schedule(pool, device_id, data, target_date=date_param)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -133,7 +136,7 @@ async def get_schedules_by_day(
     pool: asyncpg.Pool = Depends(get_db_pool),
     _: None = Depends(verify_api_key),
 ):
-    """Get all schedules active on a specific day of the week."""
+    """Get all currently effective schedules active on a specific day of the week."""
     try:
         return await schedule_service.get_schedules_by_day(pool, day)
     except ValueError as e:
@@ -244,22 +247,36 @@ async def get_all_schedules(
     pool: asyncpg.Pool = Depends(get_db_pool),
     _: None = Depends(verify_api_key),
 ):
-    """Get all schedules."""
+    """Get all currently effective schedules."""
     try:
         return await schedule_service.get_all_schedules(pool)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener los horarios: {e}")
 
 
-@router.get("/{device_id}", response_model=Optional[ScheduleRead])
-async def get_schedule(
+@router.get("/{device_id}/history", response_model=List[ScheduleRead])
+async def get_schedule_history(
     device_id: int,
     pool: asyncpg.Pool = Depends(get_db_pool),
     _: None = Depends(verify_api_key),
 ):
-    """Get the schedule for a specific device."""
+    """Get all schedules (history) for a specific device."""
     try:
-        return await schedule_service.get_schedule(pool, device_id)
+        return await schedule_service.get_schedule_history(pool, device_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener historial: {e}")
+
+
+@router.get("/{device_id}", response_model=Optional[ScheduleRead])
+async def get_schedule(
+    device_id: int,
+    date_param: Optional[date] = Query(None, alias="date", description="Target date (YYYY-MM-DD) to resolve schedule"),
+    pool: asyncpg.Pool = Depends(get_db_pool),
+    _: None = Depends(verify_api_key),
+):
+    """Get the schedule for a specific device (current or at a specific date)."""
+    try:
+        return await schedule_service.get_schedule(pool, device_id, target_date=date_param)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener el horario: {e}")
 
@@ -267,12 +284,13 @@ async def get_schedule(
 @router.delete("/{device_id}", response_model=ScheduleDeleteResponse)
 async def delete_schedule(
     device_id: int,
+    schedule_id: Optional[int] = Query(None, alias="scheduleId", description="Specific schedule ID to delete"),
     pool: asyncpg.Pool = Depends(get_db_pool),
     _: None = Depends(verify_api_key),
 ):
-    """Delete the schedule for a device."""
+    """Delete a schedule for a device (current or by specific schedule ID)."""
     try:
-        await schedule_service.delete_schedule(pool, device_id)
+        await schedule_service.delete_schedule(pool, device_id, schedule_id=schedule_id)
         return ScheduleDeleteResponse(
             message=f"Horario del dispositivo {device_id} eliminado correctamente"
         )

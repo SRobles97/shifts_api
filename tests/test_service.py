@@ -5,7 +5,7 @@ The CRUD layer is mocked so these tests exercise service logic
 (serialization, error mapping, data transformation) without a real DB.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -42,12 +42,22 @@ class TestSerializeDaySchedules:
         ds = {
             "monday": DayScheduleSchema(
                 work_hours=WorkHoursSchema(start="08:00", end="17:00"),
-                break_time=BreakSchema(start="12:00", duration_minutes=60),
+                breaks=[BreakSchema(start="12:00", duration_minutes=60)],
             )
         }
         json_str = _serialize_day_schedules(ds)
         assert '"workHours"' in json_str
         assert '"durationMinutes"' in json_str
+        assert '"breaks"' in json_str
+
+    def test_no_breaks(self):
+        ds = {
+            "monday": DayScheduleSchema(
+                work_hours=WorkHoursSchema(start="08:00", end="17:00"),
+            )
+        }
+        json_str = _serialize_day_schedules(ds)
+        assert '"breaks"' not in json_str
 
 
 class TestSerializeExtraHours:
@@ -93,6 +103,19 @@ class TestBuildScheduleRead:
         assert sr.id == "1"
         assert sr.device_id == 1
         assert "monday" in sr.schedule
+        assert sr.valid_from == date(2025, 1, 1)
+        assert sr.valid_to is None
+
+    def test_breaks_parsed_as_list(self):
+        rec = make_db_record(days=["monday"])
+        sr = _build_schedule_read(rec)
+        assert sr.schedule["monday"].breaks is not None
+        assert len(sr.schedule["monday"].breaks) == 1
+
+    def test_no_break(self):
+        rec = make_db_record(days=["monday"], include_break=False)
+        sr = _build_schedule_read(rec)
+        assert sr.schedule["monday"].breaks is None
 
     def test_with_extras(self):
         rec = make_db_record(
@@ -109,7 +132,7 @@ class TestBuildScheduleRead:
                     "name": "Navidad",
                     "type": "holiday",
                     "workHours": None,
-                    "break": None,
+                    "breaks": None,
                     "isRecurring": True,
                     "recurrencePattern": "yearly",
                 }
@@ -119,6 +142,26 @@ class TestBuildScheduleRead:
         assert sr.special_days is not None
         assert "2025-12-25" in sr.special_days
 
+    def test_with_valid_to(self):
+        rec = make_db_record(valid_from=date(2025, 1, 1), valid_to=date(2025, 6, 30))
+        sr = _build_schedule_read(rec)
+        assert sr.valid_from == date(2025, 1, 1)
+        assert sr.valid_to == date(2025, 6, 30)
+
+    def test_legacy_break_backward_compat(self):
+        """Legacy DB records with single 'break' object should be read correctly."""
+        import json
+        rec = make_db_record(days=["monday"], include_break=False)
+        # Manually inject legacy format
+        ds = json.loads(rec["day_schedules"])
+        ds["monday"]["break"] = {"start": "12:00", "durationMinutes": 60}
+        rec["day_schedules"] = json.dumps(ds)
+
+        sr = _build_schedule_read(rec)
+        assert sr.schedule["monday"].breaks is not None
+        assert len(sr.schedule["monday"].breaks) == 1
+        assert sr.schedule["monday"].breaks[0].duration_minutes == 60
+
 
 class TestDbRecordToEntity:
     def test_basic(self):
@@ -126,6 +169,20 @@ class TestDbRecordToEntity:
         entity = _db_record_to_entity(rec)
         assert entity.device_id == 1
         assert entity.schedule.is_work_day("monday")
+        assert entity.valid_from == date(2025, 1, 1)
+        assert entity.valid_to is None
+
+    def test_breaks_parsed_as_list(self):
+        rec = make_db_record(days=["monday"])
+        entity = _db_record_to_entity(rec)
+        assert entity.schedule.day_schedules["monday"].breaks is not None
+        assert len(entity.schedule.day_schedules["monday"].breaks) == 1
+
+    def test_no_break(self):
+        rec = make_db_record(days=["monday"], include_break=False)
+        entity = _db_record_to_entity(rec)
+        assert entity.schedule.day_schedules["monday"].breaks is None
+        assert entity.schedule.day_schedules["monday"].total_work_minutes() == 540
 
     def test_with_special_day_work_hours(self):
         rec = make_db_record(
@@ -134,7 +191,7 @@ class TestDbRecordToEntity:
                     "name": "Medio día",
                     "type": "special_event",
                     "workHours": {"start": "08:00", "end": "13:00"},
-                    "break": {"start": "11:00", "durationMinutes": 30},
+                    "breaks": [{"start": "11:00", "durationMinutes": 30}],
                     "isRecurring": False,
                     "recurrencePattern": None,
                 }
@@ -143,6 +200,19 @@ class TestDbRecordToEntity:
         entity = _db_record_to_entity(rec)
         assert "2025-01-20" in entity.special_days
         assert entity.special_days["2025-01-20"].work_hours.end == "13:00"
+        assert len(entity.special_days["2025-01-20"].breaks) == 1
+
+    def test_legacy_break_backward_compat(self):
+        """Legacy DB records with single 'break' object should be read correctly."""
+        import json
+        rec = make_db_record(days=["monday"], include_break=False)
+        ds = json.loads(rec["day_schedules"])
+        ds["monday"]["break"] = {"start": "12:00", "durationMinutes": 60}
+        rec["day_schedules"] = json.dumps(ds)
+
+        entity = _db_record_to_entity(rec)
+        assert entity.schedule.day_schedules["monday"].breaks is not None
+        assert len(entity.schedule.day_schedules["monday"].breaks) == 1
 
 
 class TestCalculateWorkHoursUsage:
@@ -183,15 +253,16 @@ class TestScheduleServiceCreate:
             "schedule": {
                 "monday": {
                     "workHours": {"start": "08:00", "end": "17:00"},
-                    "break": {"start": "12:00", "durationMinutes": 60},
+                    "breaks": [{"start": "12:00", "durationMinutes": 60}],
                 }
             },
+            "validFrom": "2025-01-01",
         })
 
         rec = make_db_record(device_id=1, days=["monday"])
 
-        with patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=1), \
-             patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
             result = await ScheduleService.create_schedule(pool, data)
 
         assert result.device_id == 1
@@ -207,16 +278,17 @@ class TestScheduleServiceCreateByName:
             "schedule": {
                 "monday": {
                     "workHours": {"start": "08:00", "end": "17:00"},
-                    "break": {"start": "12:00", "durationMinutes": 60},
+                    "breaks": [{"start": "12:00", "durationMinutes": 60}],
                 }
             },
+            "validFrom": "2025-01-01",
         })
 
         rec = make_db_record(device_id=1, days=["monday"])
 
         with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=1), \
-             patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=1), \
-             patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+             patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
             result = await ScheduleService.create_schedule(pool, data)
 
         assert result.device_id == 1
@@ -229,9 +301,10 @@ class TestScheduleServiceCreateByName:
             "schedule": {
                 "monday": {
                     "workHours": {"start": "08:00", "end": "17:00"},
-                    "break": {"start": "12:00", "durationMinutes": 60},
+                    "breaks": [{"start": "12:00", "durationMinutes": 60}],
                 }
             },
+            "validFrom": "2025-01-01",
         })
 
         with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=None):
@@ -245,9 +318,10 @@ class TestScheduleServiceCreateByName:
             "schedule": {
                 "monday": {
                     "workHours": {"start": "08:00", "end": "17:00"},
-                    "break": {"start": "12:00", "durationMinutes": 60},
+                    "breaks": [{"start": "12:00", "durationMinutes": 60}],
                 }
             },
+            "validFrom": "2025-01-01",
         })
 
         with pytest.raises(ValueError, match="Either deviceId or deviceName"):
@@ -262,12 +336,12 @@ class TestScheduleServiceUpdate:
             "schedule": {
                 "monday": {
                     "workHours": {"start": "09:00", "end": "18:00"},
-                    "break": {"start": "13:00", "durationMinutes": 45},
+                    "breaks": [{"start": "13:00", "durationMinutes": 45}],
                 }
             },
         })
 
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             with pytest.raises(LookupError):
                 await ScheduleService.update_schedule(pool, 999, data)
 
@@ -278,7 +352,7 @@ class TestScheduleServiceUpdate:
             "schedule": {
                 "monday": {
                     "workHours": {"start": "09:00", "end": "18:00"},
-                    "break": {"start": "13:00", "durationMinutes": 45},
+                    "breaks": [{"start": "13:00", "durationMinutes": 45}],
                 }
             },
         })
@@ -286,8 +360,9 @@ class TestScheduleServiceUpdate:
         existing = make_db_record(device_id=5)
         updated = make_db_record(device_id=5, days=["monday"])
 
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, side_effect=[existing, updated]), \
-             patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=5):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=updated):
             result = await ScheduleService.update_schedule(pool, 5, data)
 
         assert result.device_id == 5
@@ -299,7 +374,7 @@ class TestScheduleServicePatch:
         pool = AsyncMock()
         data = SchedulePatch.model_validate({"metadata": {"version": "2.0"}})
 
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             with pytest.raises(LookupError):
                 await ScheduleService.patch_schedule(pool, 999, data)
 
@@ -311,8 +386,9 @@ class TestScheduleServicePatch:
         existing = make_db_record(device_id=3)
         updated = make_db_record(device_id=3, version="2.0")
 
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, side_effect=[existing, updated]), \
-             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=updated):
             result = await ScheduleService.patch_schedule(pool, 3, data)
 
         assert result.device_id == 3
@@ -322,7 +398,7 @@ class TestScheduleServiceGet:
     @pytest.mark.asyncio
     async def test_get_not_found(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             result = await ScheduleService.get_schedule(pool, 999)
         assert result is None
 
@@ -330,16 +406,35 @@ class TestScheduleServiceGet:
     async def test_get_found(self):
         pool = AsyncMock()
         rec = make_db_record(device_id=2)
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=rec):
             result = await ScheduleService.get_schedule(pool, 2)
+        assert result.device_id == 2
+
+    @pytest.mark.asyncio
+    async def test_get_with_date(self):
+        pool = AsyncMock()
+        rec = make_db_record(device_id=2)
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=rec):
+            result = await ScheduleService.get_schedule(pool, 2, target_date=date(2025, 6, 15))
         assert result.device_id == 2
 
     @pytest.mark.asyncio
     async def test_get_all(self):
         pool = AsyncMock()
         recs = [make_db_record(id=1, device_id=1), make_db_record(id=2, device_id=2)]
-        with patch(f"{CRUD_PATH}.get_all", new_callable=AsyncMock, return_value=recs):
+        with patch(f"{CRUD_PATH}.get_all_current", new_callable=AsyncMock, return_value=recs):
             results = await ScheduleService.get_all_schedules(pool)
+        assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_get_history(self):
+        pool = AsyncMock()
+        recs = [
+            make_db_record(id=1, device_id=1, valid_from=date(2025, 1, 1), valid_to=date(2025, 6, 30)),
+            make_db_record(id=2, device_id=1, valid_from=date(2025, 7, 1)),
+        ]
+        with patch(f"{CRUD_PATH}.get_all_by_device_id", new_callable=AsyncMock, return_value=recs):
+            results = await ScheduleService.get_schedule_history(pool, 1)
         assert len(results) == 2
 
 
@@ -363,15 +458,22 @@ class TestScheduleServiceDelete:
     @pytest.mark.asyncio
     async def test_delete_not_found(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.delete_by_device_id", new_callable=AsyncMock, return_value=False):
+        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=False):
             with pytest.raises(LookupError):
                 await ScheduleService.delete_schedule(pool, 999)
 
     @pytest.mark.asyncio
     async def test_delete_success(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.delete_by_device_id", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True):
             result = await ScheduleService.delete_schedule(pool, 1)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_delete_by_schedule_id(self):
+        pool = AsyncMock()
+        with patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True):
+            result = await ScheduleService.delete_schedule(pool, 1, schedule_id=42)
         assert result is True
 
 
@@ -400,14 +502,15 @@ class TestScheduleServiceSpecialDays:
             special_days=make_special_days_json({
                 "2025-12-25": {
                     "name": "Navidad", "type": "holiday",
-                    "workHours": None, "break": None,
+                    "workHours": None, "breaks": None,
                     "isRecurring": False, "recurrencePattern": None,
                 }
             }),
         )
 
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, side_effect=[existing, updated]), \
-             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=updated):
             result = await ScheduleService.add_special_day(pool, 1, "2025-12-25", sd)
 
         assert result.special_days is not None
@@ -415,7 +518,7 @@ class TestScheduleServiceSpecialDays:
     @pytest.mark.asyncio
     async def test_delete_special_day_not_found(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             with pytest.raises(LookupError):
                 await ScheduleService.delete_special_day(pool, 999, "2025-12-25")
 
@@ -430,7 +533,7 @@ class TestScheduleServiceEffective:
     @pytest.mark.asyncio
     async def test_not_found(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=None):
             with pytest.raises(LookupError):
                 await ScheduleService.get_effective_schedule(pool, 999, "2025-01-13")
 
@@ -438,7 +541,7 @@ class TestScheduleServiceEffective:
     async def test_regular_work_day(self):
         pool = AsyncMock()
         rec = make_db_record(device_id=1, days=["monday"])
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=rec):
             # 2025-01-13 is a Monday
             result = await ScheduleService.get_effective_schedule(pool, 1, "2025-01-13")
         assert result is not None
@@ -448,7 +551,7 @@ class TestScheduleServiceEffective:
     async def test_non_work_day(self):
         pool = AsyncMock()
         rec = make_db_record(device_id=1, days=["monday"])
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=rec):
             # 2025-01-12 is a Sunday
             result = await ScheduleService.get_effective_schedule(pool, 1, "2025-01-12")
         assert result is None

@@ -42,8 +42,17 @@ async def init_db():
                 logger.warning(f"No se pudo habilitar TimescaleDB: {e}")
                 logger.info("Continuando con PostgreSQL estándar...")
 
-            # Verificar existencia de tabla de horarios antes de crearla
-            schedules_exists = await conn.fetchval(
+            # Enable btree_gist for exclusion constraint
+            try:
+                await conn.execute(
+                    "CREATE EXTENSION IF NOT EXISTS btree_gist;"
+                )
+                logger.info("Extensión btree_gist habilitada correctamente.")
+            except Exception as e:
+                logger.warning(f"No se pudo habilitar btree_gist: {e}")
+
+            # Check if old schedules table exists (for migration)
+            old_schedules_exists = await conn.fetchval(
                 """
                 SELECT EXISTS (SELECT 1
                                FROM information_schema.tables
@@ -51,45 +60,92 @@ async def init_db():
                 """
             )
 
-            # Crear tabla para horarios de dispositivos
-            if not schedules_exists:
+            # Check if new device_schedules table exists
+            device_schedules_exists = await conn.fetchval(
+                """
+                SELECT EXISTS (SELECT 1
+                               FROM information_schema.tables
+                               WHERE table_name = 'device_schedules');
+                """
+            )
+
+            # Create device_schedules table
+            if not device_schedules_exists:
                 await conn.execute(
                     """
-                    CREATE TABLE schedules
+                    CREATE TABLE device_schedules
                     (
                         id            BIGSERIAL    PRIMARY KEY,
                         device_id     BIGINT       NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
                         day_schedules JSONB        NOT NULL,
                         extra_hours   JSONB,
                         special_days  JSONB,
+                        valid_from    DATE         NOT NULL,
+                        valid_to      DATE,
+                        valid_range   DATERANGE    NOT NULL GENERATED ALWAYS AS (
+                                          daterange(valid_from, COALESCE(valid_to, '9999-12-31'::date), '[]')
+                                      ) STORED,
                         version       TEXT         NOT NULL DEFAULT '1.0',
                         source        TEXT         NOT NULL DEFAULT 'ui',
                         created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
                         updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-                        CONSTRAINT uq_schedules_device UNIQUE(device_id)
+                        CONSTRAINT excl_device_date_overlap
+                            EXCLUDE USING gist (device_id WITH =, valid_range WITH &&)
                     );
                     """
                 )
-                logger.info("Tabla 'schedules' creada correctamente.")
+                logger.info("Tabla 'device_schedules' creada correctamente.")
 
-                # Index on device_id (covered by UNIQUE but explicit for clarity)
+                # Indexes
                 await conn.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_schedules_device_id
-                    ON schedules (device_id);
+                    CREATE INDEX IF NOT EXISTS idx_device_schedules_device_id
+                    ON device_schedules (device_id);
                     """
                 )
-
-                # GIN index for special_days JSONB queries
                 await conn.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_schedules_special_days
-                    ON schedules USING GIN (special_days);
+                    CREATE INDEX IF NOT EXISTS idx_device_schedules_valid_range
+                    ON device_schedules USING gist (valid_range);
                     """
                 )
-                logger.info("Índices creados correctamente.")
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_device_schedules_special_days
+                    ON device_schedules USING GIN (special_days);
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_device_schedules_created_at
+                    ON device_schedules (created_at DESC);
+                    """
+                )
+                logger.info("Índices de 'device_schedules' creados correctamente.")
+
+                # Migrate data from old schedules table if it exists
+                if old_schedules_exists:
+                    migrated = await conn.fetchval(
+                        """
+                        INSERT INTO device_schedules (
+                            device_id, day_schedules, extra_hours, special_days,
+                            valid_from, valid_to, version, source, created_at, updated_at
+                        )
+                        SELECT
+                            device_id, day_schedules, extra_hours, special_days,
+                            created_at::date, NULL, version, source, created_at, updated_at
+                        FROM schedules
+                        RETURNING COUNT(*);
+                        """
+                    )
+                    logger.info(f"Migrados {migrated} registros de 'schedules' a 'device_schedules'.")
+
+                    # Rename old table
+                    await conn.execute("ALTER TABLE schedules RENAME TO schedules_old;")
+                    logger.info("Tabla 'schedules' renombrada a 'schedules_old'.")
+
             else:
-                logger.info("Tabla 'schedules' ya existe.")
+                logger.info("Tabla 'device_schedules' ya existe.")
 
             # Configurar optimizaciones específicas de TimescaleDB
             await setup_timescaledb(conn)
@@ -121,23 +177,11 @@ async def setup_timescaledb(conn: asyncpg.Connection):
 
         logger.info("Configurando TimescaleDB...")
 
-        # Skip TimescaleDB hypertable features for schedules table
-        # The schedules table is a configuration table, not time-series data
+        # Skip TimescaleDB hypertable features for device_schedules table
+        # The device_schedules table is a configuration table, not time-series data
         logger.info(
-            "Omitiendo configuración de hypertable para schedules (tabla de configuración, no series temporales)."
+            "Omitiendo configuración de hypertable para device_schedules (tabla de configuración, no series temporales)."
         )
-
-        try:
-            # Índice para consultas por fecha de creación
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_schedules_created_at
-                    ON schedules (created_at DESC);
-                """
-            )
-            logger.info("Índices optimizados creados correctamente.")
-        except Exception as e:
-            logger.warning(f"Error al crear índices: {e}")
 
         logger.info("Configuración de TimescaleDB completada exitosamente.")
 

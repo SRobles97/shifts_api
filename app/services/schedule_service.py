@@ -8,7 +8,7 @@ The router maps these to HTTP status codes.
 
 import json
 import re
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional
 
 import asyncpg
@@ -60,13 +60,15 @@ def _serialize_day_schedules(schedule_dict: Dict[str, DayScheduleSchema]) -> str
     """Convert DayScheduleSchema dict to JSON string for DB storage."""
     result = {}
     for day, ds in schedule_dict.items():
-        result[day] = {
+        day_data: Dict[str, Any] = {
             "workHours": {"start": ds.work_hours.start, "end": ds.work_hours.end},
-            "break": {
-                "start": ds.break_time.start,
-                "durationMinutes": ds.break_time.duration_minutes,
-            },
         }
+        if ds.breaks:
+            day_data["breaks"] = [
+                {"start": b.start, "durationMinutes": b.duration_minutes}
+                for b in ds.breaks
+            ]
+        result[day] = day_data
     return json.dumps(result)
 
 
@@ -99,9 +101,15 @@ def _build_schedule_read(db_record: dict) -> ScheduleRead:
 
     day_schedules_dict = {}
     for day, cfg in day_schedules_data.items():
+        breaks_list = None
+        if cfg.get("breaks"):
+            breaks_list = [BreakSchema(**b) for b in cfg["breaks"]]
+        elif cfg.get("break"):
+            # Legacy single-object format
+            breaks_list = [BreakSchema(**cfg["break"])]
         day_schedules_dict[day] = DayScheduleSchema(
             work_hours=WorkHoursSchema(**cfg["workHours"]),
-            break_time=BreakSchema(**cfg["break"]),
+            breaks=breaks_list,
         )
 
     # Parse extra_hours
@@ -124,12 +132,17 @@ def _build_schedule_read(db_record: dict) -> ScheduleRead:
         special_days_dict = {}
         for date_str, sd in sd_data.items():
             work_hours = WorkHoursSchema(**sd["workHours"]) if sd.get("workHours") else None
-            break_time = BreakSchema(**sd["break"]) if sd.get("break") else None
+            breaks_list = None
+            if sd.get("breaks"):
+                breaks_list = [BreakSchema(**b) for b in sd["breaks"]]
+            elif sd.get("break"):
+                # Legacy single-object format
+                breaks_list = [BreakSchema(**sd["break"])]
             special_days_dict[date_str] = SpecialDaySchema(
                 name=sd["name"],
                 type=sd["type"],
                 work_hours=work_hours,
-                break_time=break_time,
+                breaks=breaks_list,
                 is_recurring=sd.get("isRecurring", False),
                 recurrence_pattern=sd.get("recurrencePattern"),
             )
@@ -141,6 +154,8 @@ def _build_schedule_read(db_record: dict) -> ScheduleRead:
         schedule=day_schedules_dict,
         extra_hours=extra_hours_dict,
         special_days=special_days_dict,
+        valid_from=db_record["valid_from"],
+        valid_to=db_record.get("valid_to"),
         metadata=MetadataSchema(
             created_at=db_record["created_at"],
             version=db_record["version"],
@@ -173,12 +188,19 @@ def _calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> di
     today_schedule = day_schedules_data[current_day]
     work_start = _parse_time_string(today_schedule["workHours"]["start"])
     work_end = _parse_time_string(today_schedule["workHours"]["end"])
-    break_start = _parse_time_string(today_schedule["break"]["start"])
-    break_duration = today_schedule["break"]["durationMinutes"]
+
+    # Parse breaks (new array format or legacy single-object)
+    breaks_data = []
+    if today_schedule.get("breaks"):
+        breaks_data = today_schedule["breaks"]
+    elif today_schedule.get("break"):
+        breaks_data = [today_schedule["break"]]
+
+    total_break_duration = sum(b["durationMinutes"] for b in breaks_data)
 
     work_start_minutes = _time_to_minutes(work_start)
     work_end_minutes = _time_to_minutes(work_end)
-    total_work_minutes = work_end_minutes - work_start_minutes - break_duration
+    total_work_minutes = work_end_minutes - work_start_minutes - total_break_duration
     total_work_hours = total_work_minutes / 60.0
 
     current_minutes = _time_to_minutes(current_time_obj)
@@ -191,11 +213,13 @@ def _calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> di
         usage_percentage = 100.0
     else:
         work_minutes_elapsed = current_minutes - work_start_minutes
-        break_start_minutes = _time_to_minutes(break_start)
-        if current_minutes > break_start_minutes + break_duration:
-            work_minutes_elapsed -= break_duration
-        elif current_minutes > break_start_minutes:
-            work_minutes_elapsed -= current_minutes - break_start_minutes
+        for b in breaks_data:
+            b_start = _time_to_minutes(_parse_time_string(b["start"]))
+            b_dur = b["durationMinutes"]
+            if current_minutes > b_start + b_dur:
+                work_minutes_elapsed -= b_dur
+            elif current_minutes > b_start:
+                work_minutes_elapsed -= current_minutes - b_start
 
         hours_used = max(0, work_minutes_elapsed) / 60.0
         usage_percentage = (
@@ -231,9 +255,14 @@ def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
 
     day_schedules_dict = {}
     for day, cfg in day_schedules_data.items():
+        breaks_list = None
+        if cfg.get("breaks"):
+            breaks_list = [_parse_break(b) for b in cfg["breaks"]]
+        elif cfg.get("break"):
+            breaks_list = [_parse_break(cfg["break"])]
         day_schedules_dict[day] = DaySchedule(
             work_hours=WorkHours(**cfg["workHours"]),
-            break_time=_parse_break(cfg["break"]),
+            breaks=breaks_list,
         )
 
     schedule = Schedule(day_schedules=day_schedules_dict)
@@ -252,17 +281,21 @@ def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
         sd_data = db_record["special_days"]
         if isinstance(sd_data, str):
             sd_data = json.loads(sd_data)
-        special_days_dict = {
-            date_str: SpecialDay(
+        special_days_dict = {}
+        for date_str, sd in sd_data.items():
+            breaks_list = None
+            if sd.get("breaks"):
+                breaks_list = [_parse_break(b) for b in sd["breaks"]]
+            elif sd.get("break"):
+                breaks_list = [_parse_break(sd["break"])]
+            special_days_dict[date_str] = SpecialDay(
                 name=sd["name"],
                 type=sd["type"],
                 work_hours=WorkHours(**sd["workHours"]) if sd.get("workHours") else None,
-                break_time=_parse_break(sd["break"]) if sd.get("break") else None,
+                breaks=breaks_list,
                 is_recurring=sd.get("isRecurring", False),
                 recurrence_pattern=sd.get("recurrencePattern"),
             )
-            for date_str, sd in sd_data.items()
-        }
 
     return ScheduleEntity(
         id=db_record["id"],
@@ -270,6 +303,8 @@ def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
         schedule=schedule,
         extra_hours=extra_hours_dict,
         special_days=special_days_dict,
+        valid_from=db_record["valid_from"],
+        valid_to=db_record.get("valid_to"),
         created_at=db_record["created_at"],
         updated_at=db_record["updated_at"],
         version=db_record["version"],
@@ -305,28 +340,52 @@ class ScheduleService:
             "day_schedules": _serialize_day_schedules(data.schedule),
             "extra_hours": _serialize_extra_hours(data.extra_hours),
             "special_days": _serialize_special_days(data.special_days),
+            "valid_from": data.valid_from,
+            "valid_to": data.valid_to,
             "version": data.metadata.version if data.metadata else "1.0",
             "source": data.metadata.source if data.metadata else "ui",
         }
 
-        schedule_id = await schedule_crud.upsert(pool, schedule_data)
+        schedule_id = await schedule_crud.create_with_auto_close(pool, schedule_data)
 
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
+        db_record = await schedule_crud.get_by_id(pool, schedule_id)
         if not db_record:
             raise RuntimeError("Failed to retrieve created schedule")
 
         return _build_schedule_read(db_record)
 
     @staticmethod
+    async def get_schedule(
+        pool: asyncpg.Pool, device_id: int, target_date: Optional[date] = None
+    ) -> Optional[ScheduleRead]:
+        if target_date:
+            db_record = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
+        else:
+            db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
+        if not db_record:
+            return None
+        return _build_schedule_read(db_record)
+
+    @staticmethod
+    async def get_schedule_history(pool: asyncpg.Pool, device_id: int) -> List[ScheduleRead]:
+        """Get all schedules (history) for a device."""
+        db_records = await schedule_crud.get_all_by_device_id(pool, device_id)
+        return [_build_schedule_read(r) for r in db_records]
+
+    @staticmethod
     async def update_schedule(
-        pool: asyncpg.Pool, device_id: int, data: ScheduleUpdate
+        pool: asyncpg.Pool, device_id: int, data: ScheduleUpdate,
+        target_date: Optional[date] = None,
     ) -> ScheduleRead:
-        existing = await schedule_crud.get_by_device_id(pool, device_id)
+        if target_date:
+            existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
+        else:
+            existing = await schedule_crud.get_current_by_device_id(pool, device_id)
         if not existing:
             raise LookupError(f"Schedule for device_id={device_id} not found")
 
-        schedule_data = {
-            "device_id": device_id,
+        schedule_id = existing["id"]
+        update_data: Dict[str, Any] = {
             "day_schedules": _serialize_day_schedules(data.schedule),
             "extra_hours": _serialize_extra_hours(data.extra_hours),
             "special_days": _serialize_special_days(data.special_days),
@@ -334,19 +393,29 @@ class ScheduleService:
             "source": data.metadata.source if data.metadata else "ui",
         }
 
-        await schedule_crud.upsert(pool, schedule_data)
+        if data.valid_from is not None:
+            update_data["valid_from"] = data.valid_from
+        if data.valid_to is not None:
+            update_data["valid_to"] = data.valid_to
 
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
+        await schedule_crud.partial_update(pool, schedule_id, update_data)
+
+        db_record = await schedule_crud.get_by_id(pool, schedule_id)
         return _build_schedule_read(db_record)
 
     @staticmethod
     async def patch_schedule(
-        pool: asyncpg.Pool, device_id: int, data: SchedulePatch
+        pool: asyncpg.Pool, device_id: int, data: SchedulePatch,
+        target_date: Optional[date] = None,
     ) -> ScheduleRead:
-        existing = await schedule_crud.get_by_device_id(pool, device_id)
+        if target_date:
+            existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
+        else:
+            existing = await schedule_crud.get_current_by_device_id(pool, device_id)
         if not existing:
             raise LookupError(f"Schedule for device_id={device_id} not found")
 
+        schedule_id = existing["id"]
         update_data: Dict[str, Any] = {}
 
         if data.schedule is not None:
@@ -358,6 +427,12 @@ class ScheduleService:
         if data.special_days is not None:
             update_data["special_days"] = _serialize_special_days(data.special_days)
 
+        if data.valid_from is not None:
+            update_data["valid_from"] = data.valid_from
+
+        if data.valid_to is not None:
+            update_data["valid_to"] = data.valid_to
+
         if data.metadata:
             if data.metadata.version:
                 update_data["version"] = data.metadata.version
@@ -365,21 +440,14 @@ class ScheduleService:
                 update_data["source"] = data.metadata.source
 
         if update_data:
-            await schedule_crud.partial_update(pool, device_id, update_data)
+            await schedule_crud.partial_update(pool, schedule_id, update_data)
 
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
-        return _build_schedule_read(db_record)
-
-    @staticmethod
-    async def get_schedule(pool: asyncpg.Pool, device_id: int) -> Optional[ScheduleRead]:
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
-        if not db_record:
-            return None
+        db_record = await schedule_crud.get_by_id(pool, schedule_id)
         return _build_schedule_read(db_record)
 
     @staticmethod
     async def get_all_schedules(pool: asyncpg.Pool) -> List[ScheduleRead]:
-        db_records = await schedule_crud.get_all(pool)
+        db_records = await schedule_crud.get_all_current(pool)
         return [_build_schedule_read(r) for r in db_records]
 
     @staticmethod
@@ -391,8 +459,13 @@ class ScheduleService:
         return [_build_schedule_read(r) for r in db_records]
 
     @staticmethod
-    async def delete_schedule(pool: asyncpg.Pool, device_id: int) -> bool:
-        deleted = await schedule_crud.delete_by_device_id(pool, device_id)
+    async def delete_schedule(
+        pool: asyncpg.Pool, device_id: int, schedule_id: Optional[int] = None
+    ) -> bool:
+        if schedule_id:
+            deleted = await schedule_crud.delete_by_id(pool, schedule_id)
+        else:
+            deleted = await schedule_crud.delete_current_by_device_id(pool, device_id)
         if not deleted:
             raise LookupError(f"Schedule for device_id={device_id} not found")
         return True
@@ -400,7 +473,7 @@ class ScheduleService:
     @staticmethod
     async def get_all_stats(pool: asyncpg.Pool) -> AllScheduleStatsResponse:
         current_time = datetime.now()
-        db_records = await schedule_crud.get_all(pool)
+        db_records = await schedule_crud.get_all_current(pool)
 
         device_stats = []
         for rec in db_records:
@@ -417,7 +490,7 @@ class ScheduleService:
         pool: asyncpg.Pool, device_id: int
     ) -> SingleScheduleStatsResponse:
         current_time = datetime.now()
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
+        db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
 
@@ -446,9 +519,11 @@ class ScheduleService:
         if not _DATE_RE.match(date_str):
             raise ValueError("Formato de fecha inválido. Use YYYY-MM-DD")
 
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
+        db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
+
+        schedule_id = db_record["id"]
 
         sd_data = db_record.get("special_days")
         if sd_data:
@@ -459,10 +534,10 @@ class ScheduleService:
         special_days[date_str] = special_day.model_dump(by_alias=True)
 
         await schedule_crud.partial_update(
-            pool, device_id, {"special_days": json.dumps(special_days)}
+            pool, schedule_id, {"special_days": json.dumps(special_days)}
         )
 
-        updated = await schedule_crud.get_by_device_id(pool, device_id)
+        updated = await schedule_crud.get_by_id(pool, schedule_id)
         return _build_schedule_read(updated)
 
     @staticmethod
@@ -472,9 +547,11 @@ class ScheduleService:
         if not _DATE_RE.match(date_str):
             raise ValueError("Formato de fecha inválido. Use YYYY-MM-DD")
 
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
+        db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
+
+        schedule_id = db_record["id"]
 
         sd_data = db_record.get("special_days")
         if not sd_data:
@@ -488,7 +565,7 @@ class ScheduleService:
 
         await schedule_crud.partial_update(
             pool,
-            device_id,
+            schedule_id,
             {"special_days": json.dumps(special_days) if special_days else None},
         )
 
@@ -503,26 +580,31 @@ class ScheduleService:
         if not _DATE_RE.match(date_str):
             raise ValueError("Formato de fecha inválido. Use YYYY-MM-DD")
 
-        db_record = await schedule_crud.get_by_device_id(pool, device_id)
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+        db_record = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
 
         entity = _db_record_to_entity(db_record)
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         effective = entity.get_effective_schedule_for_date(target_date)
 
         if effective is None:
             return None
+
+        breaks_schema = None
+        if effective.breaks:
+            breaks_schema = [
+                BreakSchema(start=b.start, duration_minutes=b.duration_minutes)
+                for b in effective.breaks
+            ]
 
         return DayScheduleSchema(
             work_hours=WorkHoursSchema(
                 start=effective.work_hours.start,
                 end=effective.work_hours.end,
             ),
-            break_time=BreakSchema(
-                start=effective.break_time.start,
-                duration_minutes=effective.break_time.duration_minutes,
-            ),
+            breaks=breaks_schema,
         )
 
 

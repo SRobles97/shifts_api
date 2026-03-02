@@ -13,8 +13,8 @@ Naming convention:
 
 from pydantic import BaseModel, Field, AliasChoices, field_validator
 from pydantic.config import ConfigDict
-from typing import List, Optional, Dict
-from datetime import datetime
+from typing import Any, List, Optional, Dict
+from datetime import date, datetime
 
 
 class WorkHoursSchema(BaseModel):
@@ -49,12 +49,20 @@ class DayScheduleSchema(BaseModel):
         serialization_alias="workHours",
         description="Work hours for this day",
     )
-    break_time: BreakSchema = Field(
-        ...,
-        validation_alias=AliasChoices("break", "break_time"),
-        serialization_alias="break",
-        description="Break configuration for this day",
+    breaks: Optional[List[BreakSchema]] = Field(
+        None,
+        validation_alias=AliasChoices("breaks", "break", "break_time"),
+        serialization_alias="breaks",
+        description="Break configurations for this day (optional)",
     )
+
+    @field_validator("breaks", mode="before")
+    @classmethod
+    def wrap_single_break(cls, v: Any) -> Any:
+        """Accept legacy single break object and wrap into a list."""
+        if isinstance(v, dict):
+            return [v]
+        return v
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -82,12 +90,21 @@ class SpecialDaySchema(BaseModel):
         serialization_alias="workHours",
         description="Work hours for this special day (null = no work)"
     )
-    break_time: Optional[BreakSchema] = Field(
+    breaks: Optional[List[BreakSchema]] = Field(
         None,
-        validation_alias=AliasChoices("break", "break_time"),
-        serialization_alias="break",
-        description="Break configuration for this special day"
+        validation_alias=AliasChoices("breaks", "break", "break_time"),
+        serialization_alias="breaks",
+        description="Break configurations for this special day"
     )
+
+    @field_validator("breaks", mode="before")
+    @classmethod
+    def wrap_single_break(cls, v: Any) -> Any:
+        """Accept legacy single break object and wrap into a list."""
+        if isinstance(v, dict):
+            return [v]
+        return v
+
     is_recurring: bool = Field(
         default=False,
         validation_alias=AliasChoices("isRecurring", "is_recurring"),
@@ -158,6 +175,18 @@ class ScheduleCreate(BaseModel):
         serialization_alias="specialDays",
         description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
     )
+    valid_from: date = Field(
+        ...,
+        validation_alias=AliasChoices("validFrom", "valid_from"),
+        serialization_alias="validFrom",
+        description="Start date of schedule validity (YYYY-MM-DD)",
+    )
+    valid_to: Optional[date] = Field(
+        None,
+        validation_alias=AliasChoices("validTo", "valid_to"),
+        serialization_alias="validTo",
+        description="End date of schedule validity (None = open-ended)",
+    )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 
     @field_validator("device_id")
@@ -188,6 +217,18 @@ class ScheduleUpdate(BaseModel):
         serialization_alias="specialDays",
         description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
     )
+    valid_from: Optional[date] = Field(
+        None,
+        validation_alias=AliasChoices("validFrom", "valid_from"),
+        serialization_alias="validFrom",
+        description="New start date of schedule validity",
+    )
+    valid_to: Optional[date] = Field(
+        None,
+        validation_alias=AliasChoices("validTo", "valid_to"),
+        serialization_alias="validTo",
+        description="New end date of schedule validity",
+    )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -210,6 +251,18 @@ class SchedulePatch(BaseModel):
         validation_alias=AliasChoices("specialDays", "special_days"),
         serialization_alias="specialDays",
         description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+    )
+    valid_from: Optional[date] = Field(
+        None,
+        validation_alias=AliasChoices("validFrom", "valid_from"),
+        serialization_alias="validFrom",
+        description="New start date of schedule validity",
+    )
+    valid_to: Optional[date] = Field(
+        None,
+        validation_alias=AliasChoices("validTo", "valid_to"),
+        serialization_alias="validTo",
+        description="New end date of schedule validity",
     )
     metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
 
@@ -234,6 +287,12 @@ class ScheduleRead(BaseModel):
     )
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
         None, serialization_alias="specialDays", description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
+    )
+    valid_from: date = Field(
+        ..., serialization_alias="validFrom", description="Start date of schedule validity"
+    )
+    valid_to: Optional[date] = Field(
+        None, serialization_alias="validTo", description="End date of schedule validity"
     )
     metadata: MetadataSchema = Field(..., description="Schedule metadata")
 

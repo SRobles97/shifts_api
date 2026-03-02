@@ -6,7 +6,7 @@ and sample data factories for consistent test data.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
@@ -27,16 +27,19 @@ def make_day_schedules_json(
     work_end: str = "17:00",
     break_start: str = "12:00",
     break_duration: int = 60,
+    include_break: bool = True,
 ) -> str:
     """Return a JSON string matching the DB JSONB column format."""
     if days is None:
         days = ["monday", "tuesday", "wednesday", "thursday", "friday"]
     obj = {}
     for day in days:
-        obj[day] = {
+        day_data: Dict[str, Any] = {
             "workHours": {"start": work_start, "end": work_end},
-            "break": {"start": break_start, "durationMinutes": break_duration},
         }
+        if include_break:
+            day_data["breaks"] = [{"start": break_start, "durationMinutes": break_duration}]
+        obj[day] = day_data
     return json.dumps(obj)
 
 
@@ -62,18 +65,25 @@ def make_db_record(
     days: Optional[List[str]] = None,
     extra_hours: Optional[str] = None,
     special_days: Optional[str] = None,
+    valid_from: Optional[date] = None,
+    valid_to: Optional[date] = None,
     version: str = "1.0",
     source: str = "ui",
     device_name: Optional[str] = "1103",
+    include_break: bool = True,
 ) -> Dict[str, Any]:
-    """Create a dict that mimics an asyncpg.Record for a schedule row."""
+    """Create a dict that mimics an asyncpg.Record for a device_schedules row."""
     now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+    if valid_from is None:
+        valid_from = date(2025, 1, 1)
     return {
         "id": id,
         "device_id": device_id,
-        "day_schedules": make_day_schedules_json(days),
+        "day_schedules": make_day_schedules_json(days, include_break=include_break),
         "extra_hours": extra_hours,
         "special_days": special_days,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
         "created_at": now,
         "updated_at": now,
         "version": version,
@@ -113,7 +123,7 @@ def sample_record_with_special_days():
                     "name": "Navidad",
                     "type": "holiday",
                     "workHours": None,
-                    "break": None,
+                    "breaks": None,
                     "isRecurring": True,
                     "recurrencePattern": "yearly",
                 }
@@ -155,13 +165,14 @@ def create_payload() -> Dict[str, Any]:
         "schedule": {
             "monday": {
                 "workHours": {"start": "08:00", "end": "17:00"},
-                "break": {"start": "12:00", "durationMinutes": 60},
+                "breaks": [{"start": "12:00", "durationMinutes": 60}],
             },
             "tuesday": {
                 "workHours": {"start": "08:00", "end": "17:00"},
-                "break": {"start": "12:00", "durationMinutes": 60},
+                "breaks": [{"start": "12:00", "durationMinutes": 60}],
             },
         },
+        "validFrom": "2025-01-01",
     }
 
 
@@ -172,7 +183,7 @@ def update_payload() -> Dict[str, Any]:
         "schedule": {
             "monday": {
                 "workHours": {"start": "09:00", "end": "18:00"},
-                "break": {"start": "13:00", "durationMinutes": 45},
+                "breaks": [{"start": "13:00", "durationMinutes": 45}],
             },
         },
     }

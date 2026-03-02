@@ -44,8 +44,8 @@ class TestCreateSchedule:
     @pytest.mark.asyncio
     async def test_create_success(self, client):
         rec = make_db_record(device_id=1, days=["monday"])
-        with patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=1), \
-             patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
             resp = await client.post(
                 "/",
                 json={
@@ -53,21 +53,23 @@ class TestCreateSchedule:
                     "schedule": {
                         "monday": {
                             "workHours": {"start": "08:00", "end": "17:00"},
-                            "break": {"start": "12:00", "durationMinutes": 60},
+                            "breaks": [{"start": "12:00", "durationMinutes": 60}],
                         }
                     },
+                    "validFrom": "2025-01-01",
                 },
             )
         assert resp.status_code == 200
         body = resp.json()
         assert body["deviceId"] == 1
+        assert body["validFrom"] == "2025-01-01"
 
     @pytest.mark.asyncio
     async def test_create_with_device_name(self, client):
         rec = make_db_record(device_id=1, days=["monday"])
         with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=1), \
-             patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=1), \
-             patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+             patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
             resp = await client.post(
                 "/",
                 json={
@@ -75,9 +77,10 @@ class TestCreateSchedule:
                     "schedule": {
                         "monday": {
                             "workHours": {"start": "08:00", "end": "17:00"},
-                            "break": {"start": "12:00", "durationMinutes": 60},
+                            "breaks": [{"start": "12:00", "durationMinutes": 60}],
                         }
                     },
+                    "validFrom": "2025-01-01",
                 },
             )
         assert resp.status_code == 200
@@ -93,26 +96,108 @@ class TestCreateSchedule:
                     "schedule": {
                         "monday": {
                             "workHours": {"start": "08:00", "end": "17:00"},
-                            "break": {"start": "12:00", "durationMinutes": 60},
+                            "breaks": [{"start": "12:00", "durationMinutes": 60}],
                         }
                     },
+                    "validFrom": "2025-01-01",
                 },
             )
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_create_missing_valid_from(self, client):
+        resp = await client.post(
+            "/",
+            json={
+                "deviceId": 1,
+                "schedule": {
+                    "monday": {
+                        "workHours": {"start": "08:00", "end": "17:00"},
+                        "breaks": [{"start": "12:00", "durationMinutes": 60}],
+                    }
+                },
+            },
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_create_without_breaks(self, client):
+        rec = make_db_record(device_id=1, days=["monday"], include_break=False)
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
+            resp = await client.post(
+                "/",
+                json={
+                    "deviceId": 1,
+                    "schedule": {
+                        "monday": {
+                            "workHours": {"start": "08:00", "end": "17:00"},
+                        }
+                    },
+                    "validFrom": "2025-01-01",
+                },
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["schedule"]["monday"]["breaks"] is None
+
+    @pytest.mark.asyncio
+    async def test_create_with_multiple_breaks(self, client):
+        rec = make_db_record(device_id=1, days=["monday"])
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
+            resp = await client.post(
+                "/",
+                json={
+                    "deviceId": 1,
+                    "schedule": {
+                        "monday": {
+                            "workHours": {"start": "08:00", "end": "17:00"},
+                            "breaks": [
+                                {"start": "10:00", "durationMinutes": 15},
+                                {"start": "12:00", "durationMinutes": 60},
+                            ],
+                        }
+                    },
+                    "validFrom": "2025-01-01",
+                },
+            )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_create_legacy_break_format(self, client):
+        """Legacy single-object 'break' key should still be accepted."""
+        rec = make_db_record(device_id=1, days=["monday"])
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
+            resp = await client.post(
+                "/",
+                json={
+                    "deviceId": 1,
+                    "schedule": {
+                        "monday": {
+                            "workHours": {"start": "08:00", "end": "17:00"},
+                            "break": {"start": "12:00", "durationMinutes": 60},
+                        }
+                    },
+                    "validFrom": "2025-01-01",
+                },
+            )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
     async def test_create_invalid_payload(self, client):
-        resp = await client.post("/", json={"deviceId": -1, "schedule": {}})
+        resp = await client.post("/", json={"deviceId": -1, "schedule": {}, "validFrom": "2025-01-01"})
         assert resp.status_code == 422
 
 
-# ==================== GET / (list all) ====================
+# ==================== GET / (list all current) ====================
 
 
 class TestGetAllSchedules:
     @pytest.mark.asyncio
     async def test_list_empty(self, client):
-        with patch(f"{CRUD_PATH}.get_all", new_callable=AsyncMock, return_value=[]):
+        with patch(f"{CRUD_PATH}.get_all_current", new_callable=AsyncMock, return_value=[]):
             resp = await client.get("/")
         assert resp.status_code == 200
         assert resp.json() == []
@@ -120,7 +205,7 @@ class TestGetAllSchedules:
     @pytest.mark.asyncio
     async def test_list_multiple(self, client):
         recs = [make_db_record(id=i, device_id=i) for i in range(1, 4)]
-        with patch(f"{CRUD_PATH}.get_all", new_callable=AsyncMock, return_value=recs):
+        with patch(f"{CRUD_PATH}.get_all_current", new_callable=AsyncMock, return_value=recs):
             resp = await client.get("/")
         assert resp.status_code == 200
         assert len(resp.json()) == 3
@@ -133,17 +218,49 @@ class TestGetSchedule:
     @pytest.mark.asyncio
     async def test_found(self, client):
         rec = make_db_record(device_id=2)
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=rec):
             resp = await client.get("/2")
         assert resp.status_code == 200
         assert resp.json()["deviceId"] == 2
 
     @pytest.mark.asyncio
     async def test_not_found(self, client):
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             resp = await client.get("/999")
         assert resp.status_code == 200
         assert resp.json() is None
+
+    @pytest.mark.asyncio
+    async def test_with_date_query(self, client):
+        rec = make_db_record(device_id=2)
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=rec):
+            resp = await client.get("/2?date=2025-06-15")
+        assert resp.status_code == 200
+        assert resp.json()["deviceId"] == 2
+
+
+# ==================== GET /{device_id}/history ====================
+
+
+class TestGetScheduleHistory:
+    @pytest.mark.asyncio
+    async def test_history_empty(self, client):
+        with patch(f"{CRUD_PATH}.get_all_by_device_id", new_callable=AsyncMock, return_value=[]):
+            resp = await client.get("/1/history")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    @pytest.mark.asyncio
+    async def test_history_multiple(self, client):
+        from datetime import date
+        recs = [
+            make_db_record(id=1, device_id=1, valid_from=date(2025, 1, 1), valid_to=date(2025, 6, 30)),
+            make_db_record(id=2, device_id=1, valid_from=date(2025, 7, 1)),
+        ]
+        with patch(f"{CRUD_PATH}.get_all_by_device_id", new_callable=AsyncMock, return_value=recs):
+            resp = await client.get("/1/history")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 2
 
 
 # ==================== PUT /{device_id} (update) ====================
@@ -154,15 +271,16 @@ class TestUpdateSchedule:
     async def test_update_success(self, client):
         existing = make_db_record(device_id=1)
         updated = make_db_record(device_id=1, days=["monday"])
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, side_effect=[existing, updated]), \
-             patch(f"{CRUD_PATH}.upsert", new_callable=AsyncMock, return_value=1):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=updated):
             resp = await client.put(
                 "/1",
                 json={
                     "schedule": {
                         "monday": {
                             "workHours": {"start": "09:00", "end": "18:00"},
-                            "break": {"start": "13:00", "durationMinutes": 45},
+                            "breaks": [{"start": "13:00", "durationMinutes": 45}],
                         }
                     }
                 },
@@ -171,14 +289,14 @@ class TestUpdateSchedule:
 
     @pytest.mark.asyncio
     async def test_update_not_found(self, client):
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             resp = await client.put(
                 "/999",
                 json={
                     "schedule": {
                         "monday": {
                             "workHours": {"start": "09:00", "end": "18:00"},
-                            "break": {"start": "13:00", "durationMinutes": 45},
+                            "breaks": [{"start": "13:00", "durationMinutes": 45}],
                         }
                     }
                 },
@@ -194,14 +312,15 @@ class TestPatchSchedule:
     async def test_patch_success(self, client):
         existing = make_db_record(device_id=1)
         updated = make_db_record(device_id=1, version="2.0")
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, side_effect=[existing, updated]), \
-             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=updated):
             resp = await client.patch("/1", json={"metadata": {"version": "2.0"}})
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_patch_not_found(self, client):
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             resp = await client.patch("/999", json={"metadata": {"version": "2.0"}})
         assert resp.status_code == 404
 
@@ -212,16 +331,22 @@ class TestPatchSchedule:
 class TestDeleteSchedule:
     @pytest.mark.asyncio
     async def test_delete_success(self, client):
-        with patch(f"{CRUD_PATH}.delete_by_device_id", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True):
             resp = await client.delete("/1")
         assert resp.status_code == 200
         assert "message" in resp.json()
 
     @pytest.mark.asyncio
     async def test_delete_not_found(self, client):
-        with patch(f"{CRUD_PATH}.delete_by_device_id", new_callable=AsyncMock, return_value=False):
+        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=False):
             resp = await client.delete("/999")
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_by_schedule_id(self, client):
+        with patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True):
+            resp = await client.delete("/1?scheduleId=42")
+        assert resp.status_code == 200
 
 
 # ==================== GET /by-day/{day} ====================
@@ -249,7 +374,7 @@ class TestStatsAll:
     @pytest.mark.asyncio
     async def test_stats_all(self, client):
         recs = [make_db_record(id=1, device_id=1)]
-        with patch(f"{CRUD_PATH}.get_all", new_callable=AsyncMock, return_value=recs):
+        with patch(f"{CRUD_PATH}.get_all_current", new_callable=AsyncMock, return_value=recs):
             resp = await client.get("/stats/all")
         assert resp.status_code == 200
         body = resp.json()
@@ -264,14 +389,14 @@ class TestStatsDevice:
     @pytest.mark.asyncio
     async def test_stats_found(self, client):
         rec = make_db_record(device_id=1)
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=rec):
             resp = await client.get("/stats/1")
         assert resp.status_code == 200
         assert "deviceStats" in resp.json()
 
     @pytest.mark.asyncio
     async def test_stats_not_found(self, client):
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             resp = await client.get("/stats/999")
         assert resp.status_code == 404
 
@@ -300,13 +425,14 @@ class TestSpecialDaysEndpoints:
             special_days=make_special_days_json({
                 "2025-12-25": {
                     "name": "Navidad", "type": "holiday",
-                    "workHours": None, "break": None,
+                    "workHours": None, "breaks": None,
                     "isRecurring": False, "recurrencePattern": None,
                 }
             }),
         )
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, side_effect=[existing, updated]), \
-             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=updated):
             resp = await client.post(
                 "/special-days/1?date=2025-12-25",
                 json={"name": "Navidad", "type": "holiday"},
@@ -320,13 +446,12 @@ class TestSpecialDaysEndpoints:
             special_days=make_special_days_json({
                 "2025-12-25": {
                     "name": "Navidad", "type": "holiday",
-                    "workHours": None, "break": None,
+                    "workHours": None, "breaks": None,
                     "isRecurring": False, "recurrencePattern": None,
                 }
             }),
         )
-        updated = make_db_record(device_id=1)
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec), \
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=rec), \
              patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True):
             resp = await client.delete("/special-days/1/2025-12-25")
         assert resp.status_code == 200
@@ -340,7 +465,7 @@ class TestEffectiveSchedule:
     @pytest.mark.asyncio
     async def test_regular_day(self, client):
         rec = make_db_record(device_id=1, days=["monday"])
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=rec):
             # 2025-01-13 is a Monday
             resp = await client.get("/effective-schedule/1/2025-01-13")
         assert resp.status_code == 200
@@ -350,7 +475,7 @@ class TestEffectiveSchedule:
     @pytest.mark.asyncio
     async def test_non_work_day(self, client):
         rec = make_db_record(device_id=1, days=["monday"])
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=rec):
             # 2025-01-12 is a Sunday
             resp = await client.get("/effective-schedule/1/2025-01-12")
         assert resp.status_code == 200
@@ -358,7 +483,7 @@ class TestEffectiveSchedule:
 
     @pytest.mark.asyncio
     async def test_not_found(self, client):
-        with patch(f"{CRUD_PATH}.get_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=None):
             resp = await client.get("/effective-schedule/999/2025-01-13")
         assert resp.status_code == 404
 

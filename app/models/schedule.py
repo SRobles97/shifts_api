@@ -152,30 +152,46 @@ class DaySchedule(BaseModel):
     """
 
     work_hours: WorkHours = Field(..., description="Work hours for this day")
-    break_time: Break = Field(..., description="Break configuration for this day")
+    breaks: Optional[List[Break]] = Field(None, description="Break configurations for this day")
 
-    @field_validator("break_time")
+    @field_validator("breaks")
     @classmethod
-    def break_within_work_hours(cls, v: Break, info: ValidationInfo) -> Break:
-        """Ensure break starts and ends within work hours."""
+    def validate_breaks(cls, v: Optional[List[Break]], info: ValidationInfo) -> Optional[List[Break]]:
+        """Ensure all breaks are within work hours and don't overlap."""
+        if not v:
+            return v
         work_hours: WorkHours = info.data.get("work_hours")
         if work_hours:
             work_start_dt = _parse_hhmm(work_hours.start)
             work_end_dt = _parse_hhmm(work_hours.end)
-            break_start_dt = _parse_hhmm(v.start)
-            break_end_dt = break_start_dt + timedelta(minutes=v.duration_minutes)
 
-            if not (
-                work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()
-            ):
-                raise ValueError("Break must start within work hours")
-            if break_end_dt > work_end_dt:
-                raise ValueError("Break must end within work hours")
+            for b in v:
+                break_start_dt = _parse_hhmm(b.start)
+                break_end_dt = break_start_dt + timedelta(minutes=b.duration_minutes)
+
+                if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
+                    raise ValueError("Break must start within work hours")
+                if break_end_dt > work_end_dt:
+                    raise ValueError("Break must end within work hours")
+
+            # Check for overlaps (same logic as extra_hours)
+            sorted_breaks = sorted(v, key=lambda b: _parse_hhmm(b.start))
+            last_end: Optional[datetime] = None
+            for b in sorted_breaks:
+                start_dt = _parse_hhmm(b.start)
+                end_dt = start_dt + timedelta(minutes=b.duration_minutes)
+                if last_end and start_dt < last_end:
+                    raise ValueError(f"Overlapping breaks: {b.start}")
+                last_end = end_dt
+
         return v
 
     def total_work_minutes(self) -> int:
-        """Calculate total work minutes excluding break."""
-        return self.work_hours.duration_minutes() - self.break_time.duration_minutes
+        """Calculate total work minutes excluding breaks."""
+        total = self.work_hours.duration_minutes()
+        if self.breaks:
+            total -= sum(b.duration_minutes for b in self.breaks)
+        return total
 
 
 class SpecialDay(BaseModel):
@@ -192,9 +208,9 @@ class SpecialDay(BaseModel):
         None,
         description="Work hours for this special day (None = no work)"
     )
-    break_time: Optional[Break] = Field(
+    breaks: Optional[List[Break]] = Field(
         None,
-        description="Break configuration for this special day"
+        description="Break configurations for this special day"
     )
     is_recurring: bool = Field(
         default=False,
@@ -205,24 +221,36 @@ class SpecialDay(BaseModel):
         description="Recurrence pattern if recurring"
     )
 
-    @field_validator("break_time")
+    @field_validator("breaks")
     @classmethod
-    def validate_break_requires_work_hours(cls, v: Optional[Break], info: ValidationInfo) -> Optional[Break]:
-        """Break time requires work_hours to be set."""
+    def validate_breaks_require_work_hours(cls, v: Optional[List[Break]], info: ValidationInfo) -> Optional[List[Break]]:
+        """Breaks require work_hours to be set."""
         work_hours = info.data.get("work_hours")
         if v and not work_hours:
-            raise ValueError("Break cannot be set without work hours")
+            raise ValueError("Breaks cannot be set without work hours")
 
         if v and work_hours:
             work_start_dt = _parse_hhmm(work_hours.start)
             work_end_dt = _parse_hhmm(work_hours.end)
-            break_start_dt = _parse_hhmm(v.start)
-            break_end_dt = break_start_dt + timedelta(minutes=v.duration_minutes)
 
-            if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
-                raise ValueError("Break must start within work hours")
-            if break_end_dt > work_end_dt:
-                raise ValueError("Break must end within work hours")
+            for b in v:
+                break_start_dt = _parse_hhmm(b.start)
+                break_end_dt = break_start_dt + timedelta(minutes=b.duration_minutes)
+
+                if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
+                    raise ValueError("Break must start within work hours")
+                if break_end_dt > work_end_dt:
+                    raise ValueError("Break must end within work hours")
+
+            # Check for overlaps
+            sorted_breaks = sorted(v, key=lambda b: _parse_hhmm(b.start))
+            last_end: Optional[datetime] = None
+            for b in sorted_breaks:
+                start_dt = _parse_hhmm(b.start)
+                end_dt = start_dt + timedelta(minutes=b.duration_minutes)
+                if last_end and start_dt < last_end:
+                    raise ValueError(f"Overlapping breaks: {b.start}")
+                last_end = end_dt
 
         return v
 
@@ -240,13 +268,13 @@ class SpecialDay(BaseModel):
         return v
 
     def total_work_minutes(self) -> int:
-        """Calculate total work minutes for this special day (excluding break)."""
+        """Calculate total work minutes for this special day (excluding breaks)."""
         if not self.work_hours:
             return 0
 
         work_mins = self.work_hours.duration_minutes()
-        if self.break_time:
-            work_mins -= self.break_time.duration_minutes
+        if self.breaks:
+            work_mins -= sum(b.duration_minutes for b in self.breaks)
 
         return work_mins
 
@@ -316,7 +344,7 @@ class ScheduleEntity(BaseModel):
     Complete business entity for a device schedule.
 
     Includes all schedule information plus metadata, extra hours, and special days.
-    One schedule per device (no date ranges).
+    Supports N schedules per device with valid_from/valid_to date ranges.
     """
 
     id: Optional[int] = None
@@ -328,10 +356,30 @@ class ScheduleEntity(BaseModel):
     special_days: Optional[Dict[str, SpecialDay]] = Field(
         None, description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
     )
+    valid_from: date_type = Field(..., description="Start date of schedule validity")
+    valid_to: Optional[date_type] = Field(None, description="End date of schedule validity (None = open-ended)")
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     version: str = Field(default="1.0", description="Schedule version")
     source: str = Field(default="ui", description="Schedule source")
+
+    @field_validator("valid_to")
+    @classmethod
+    def valid_to_after_valid_from(cls, v: Optional[date_type], info: ValidationInfo) -> Optional[date_type]:
+        """Ensure valid_to >= valid_from when both are set."""
+        if v is not None:
+            valid_from = info.data.get("valid_from")
+            if valid_from and v < valid_from:
+                raise ValueError("valid_to must be >= valid_from")
+        return v
+
+    def is_effective_on(self, target_date: date_type) -> bool:
+        """Check if this schedule is effective on the given date."""
+        if target_date < self.valid_from:
+            return False
+        if self.valid_to is not None and target_date > self.valid_to:
+            return False
+        return True
 
     @field_validator("device_id")
     @classmethod
@@ -437,12 +485,9 @@ class ScheduleEntity(BaseModel):
         if self.special_days and date_str in self.special_days:
             special = self.special_days[date_str]
             if special.work_hours:
-                break_time = special.break_time if special.break_time else Break(
-                    start="12:00", duration_minutes=0
-                )
                 return DaySchedule(
                     work_hours=special.work_hours,
-                    break_time=break_time
+                    breaks=special.breaks,
                 )
             return None
 
@@ -452,12 +497,9 @@ class ScheduleEntity(BaseModel):
             for special_date_str, special in self.special_days.items():
                 if special.is_recurring and special_date_str.endswith(month_day):
                     if special.work_hours:
-                        break_time = special.break_time if special.break_time else Break(
-                            start="12:00", duration_minutes=0
-                        )
                         return DaySchedule(
                             work_hours=special.work_hours,
-                            break_time=break_time
+                            break_time=special.break_time,
                         )
                     return None
 
