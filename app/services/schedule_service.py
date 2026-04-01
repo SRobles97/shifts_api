@@ -46,6 +46,7 @@ VALID_DAYS = [
 ]
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_INVALID_DATE_FMT = "Formato de fecha inválido. Use YYYY-MM-DD"
 
 
 def _parse_time_string(time_str: str) -> time:
@@ -92,60 +93,84 @@ def _serialize_special_days(
     )
 
 
+def _load_jsonb(data) -> dict:
+    """Parse a JSONB value that may be a string or already a dict."""
+    return json.loads(data) if isinstance(data, str) else data
+
+
+def _parse_breaks_schema(cfg: dict) -> Optional[List[BreakSchema]]:
+    """Parse breaks from a day config dict, handling legacy single-object format."""
+    if cfg.get("breaks"):
+        return [BreakSchema(**b) for b in cfg["breaks"]]
+    if cfg.get("break"):
+        return [BreakSchema(**cfg["break"])]
+    return None
+
+
+def _parse_breaks_model(cfg: dict) -> Optional[List[Break]]:
+    """Parse breaks from a day config dict into Break model instances."""
+    if cfg.get("breaks"):
+        return [_parse_break(b) for b in cfg["breaks"]]
+    if cfg.get("break"):
+        return [_parse_break(cfg["break"])]
+    return None
+
+
+def _parse_special_days_schema(sd_data: dict) -> Dict[str, SpecialDaySchema]:
+    """Parse special days JSONB into SpecialDaySchema instances."""
+    result = {}
+    for date_str, sd in sd_data.items():
+        work_hours = WorkHoursSchema(**sd["workHours"]) if sd.get("workHours") else None
+        result[date_str] = SpecialDaySchema(
+            name=sd["name"],
+            type=sd["type"],
+            work_hours=work_hours,
+            breaks=_parse_breaks_schema(sd),
+            is_recurring=sd.get("isRecurring", False),
+            recurrence_pattern=sd.get("recurrencePattern"),
+        )
+    return result
+
+
+def _parse_special_days_model(sd_data: dict) -> Dict[str, SpecialDay]:
+    """Parse special days JSONB into SpecialDay model instances."""
+    result = {}
+    for date_str, sd in sd_data.items():
+        result[date_str] = SpecialDay(
+            name=sd["name"],
+            type=sd["type"],
+            work_hours=WorkHours(**sd["workHours"]) if sd.get("workHours") else None,
+            breaks=_parse_breaks_model(sd),
+            is_recurring=sd.get("isRecurring", False),
+            recurrence_pattern=sd.get("recurrencePattern"),
+        )
+    return result
+
+
 def _build_schedule_read(db_record: dict) -> ScheduleRead:
     """Build a ScheduleRead from a database record."""
-    # Parse day_schedules
-    day_schedules_data = db_record["day_schedules"]
-    if isinstance(day_schedules_data, str):
-        day_schedules_data = json.loads(day_schedules_data)
-
-    day_schedules_dict = {}
-    for day, cfg in day_schedules_data.items():
-        breaks_list = None
-        if cfg.get("breaks"):
-            breaks_list = [BreakSchema(**b) for b in cfg["breaks"]]
-        elif cfg.get("break"):
-            # Legacy single-object format
-            breaks_list = [BreakSchema(**cfg["break"])]
-        day_schedules_dict[day] = DayScheduleSchema(
+    day_schedules_data = _load_jsonb(db_record["day_schedules"])
+    day_schedules_dict = {
+        day: DayScheduleSchema(
             work_hours=WorkHoursSchema(**cfg["workHours"]),
-            breaks=breaks_list,
+            breaks=_parse_breaks_schema(cfg),
         )
+        for day, cfg in day_schedules_data.items()
+    }
 
-    # Parse extra_hours
     extra_hours_dict = None
     if db_record["extra_hours"]:
-        eh_data = db_record["extra_hours"]
-        if isinstance(eh_data, str):
-            eh_data = json.loads(eh_data)
+        eh_data = _load_jsonb(db_record["extra_hours"])
         extra_hours_dict = {
             day: [ExtraHourSchema(**h) for h in hours]
             for day, hours in eh_data.items()
         }
 
-    # Parse special_days
     special_days_dict = None
     if db_record.get("special_days"):
-        sd_data = db_record["special_days"]
-        if isinstance(sd_data, str):
-            sd_data = json.loads(sd_data)
-        special_days_dict = {}
-        for date_str, sd in sd_data.items():
-            work_hours = WorkHoursSchema(**sd["workHours"]) if sd.get("workHours") else None
-            breaks_list = None
-            if sd.get("breaks"):
-                breaks_list = [BreakSchema(**b) for b in sd["breaks"]]
-            elif sd.get("break"):
-                # Legacy single-object format
-                breaks_list = [BreakSchema(**sd["break"])]
-            special_days_dict[date_str] = SpecialDaySchema(
-                name=sd["name"],
-                type=sd["type"],
-                work_hours=work_hours,
-                breaks=breaks_list,
-                is_recurring=sd.get("isRecurring", False),
-                recurrence_pattern=sd.get("recurrencePattern"),
-            )
+        special_days_dict = _parse_special_days_schema(
+            _load_jsonb(db_record["special_days"])
+        )
 
     return ScheduleRead(
         id=str(db_record["id"]),
@@ -249,58 +274,32 @@ def _parse_break(data: dict) -> Break:
 
 def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
     """Convert a DB record into a ScheduleEntity model instance."""
-    day_schedules_data = db_record["day_schedules"]
-    if isinstance(day_schedules_data, str):
-        day_schedules_data = json.loads(day_schedules_data)
-
-    day_schedules_dict = {}
-    for day, cfg in day_schedules_data.items():
-        breaks_list = None
-        if cfg.get("breaks"):
-            breaks_list = [_parse_break(b) for b in cfg["breaks"]]
-        elif cfg.get("break"):
-            breaks_list = [_parse_break(cfg["break"])]
-        day_schedules_dict[day] = DaySchedule(
+    day_schedules_data = _load_jsonb(db_record["day_schedules"])
+    day_schedules_dict = {
+        day: DaySchedule(
             work_hours=WorkHours(**cfg["workHours"]),
-            breaks=breaks_list,
+            breaks=_parse_breaks_model(cfg),
         )
-
-    schedule = Schedule(day_schedules=day_schedules_dict)
+        for day, cfg in day_schedules_data.items()
+    }
 
     extra_hours_dict = None
     if db_record.get("extra_hours"):
-        eh_data = db_record["extra_hours"]
-        if isinstance(eh_data, str):
-            eh_data = json.loads(eh_data)
+        eh_data = _load_jsonb(db_record["extra_hours"])
         extra_hours_dict = {
             day: [ExtraHour(**h) for h in hours] for day, hours in eh_data.items()
         }
 
     special_days_dict = None
     if db_record.get("special_days"):
-        sd_data = db_record["special_days"]
-        if isinstance(sd_data, str):
-            sd_data = json.loads(sd_data)
-        special_days_dict = {}
-        for date_str, sd in sd_data.items():
-            breaks_list = None
-            if sd.get("breaks"):
-                breaks_list = [_parse_break(b) for b in sd["breaks"]]
-            elif sd.get("break"):
-                breaks_list = [_parse_break(sd["break"])]
-            special_days_dict[date_str] = SpecialDay(
-                name=sd["name"],
-                type=sd["type"],
-                work_hours=WorkHours(**sd["workHours"]) if sd.get("workHours") else None,
-                breaks=breaks_list,
-                is_recurring=sd.get("isRecurring", False),
-                recurrence_pattern=sd.get("recurrencePattern"),
-            )
+        special_days_dict = _parse_special_days_model(
+            _load_jsonb(db_record["special_days"])
+        )
 
     return ScheduleEntity(
         id=db_record["id"],
         device_id=db_record["device_id"],
-        schedule=schedule,
+        schedule=Schedule(day_schedules=day_schedules_dict),
         extra_hours=extra_hours_dict,
         special_days=special_days_dict,
         valid_from=db_record["valid_from"],
@@ -517,7 +516,7 @@ class ScheduleService:
         special_day: SpecialDaySchema,
     ) -> ScheduleRead:
         if not _DATE_RE.match(date_str):
-            raise ValueError("Formato de fecha inválido. Use YYYY-MM-DD")
+            raise ValueError(_INVALID_DATE_FMT)
 
         db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
         if not db_record:
@@ -545,7 +544,7 @@ class ScheduleService:
         pool: asyncpg.Pool, device_id: int, date_str: str
     ) -> ScheduleDeleteResponse:
         if not _DATE_RE.match(date_str):
-            raise ValueError("Formato de fecha inválido. Use YYYY-MM-DD")
+            raise ValueError(_INVALID_DATE_FMT)
 
         db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
         if not db_record:
@@ -578,7 +577,7 @@ class ScheduleService:
         pool: asyncpg.Pool, device_id: int, date_str: str
     ) -> Optional[DayScheduleSchema]:
         if not _DATE_RE.match(date_str):
-            raise ValueError("Formato de fecha inválido. Use YYYY-MM-DD")
+            raise ValueError(_INVALID_DATE_FMT)
 
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
 

@@ -189,7 +189,7 @@ async def setup_timescaledb(conn: asyncpg.Connection):
         logger.error(f"Error general en configuración de TimescaleDB: {e}")
 
 
-async def get_postgres() -> asyncpg.Pool:
+def get_postgres() -> asyncpg.Pool:
     """
     Obtiene una referencia al pool de conexiones de PostgreSQL.
 

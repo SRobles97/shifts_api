@@ -136,6 +136,11 @@ class MetadataSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+_DESC_EXTRA_HOURS = "Extra hours by day of week"
+_DESC_SPECIAL_DAYS = "Special day overrides keyed by ISO date (YYYY-MM-DD)"
+_DESC_METADATA = "Schedule metadata"
+_DESC_SCHEDULE_BY_DAY = "Schedule configuration by day"
+
 # ========== Request Schemas ==========
 
 
@@ -167,13 +172,13 @@ class ScheduleCreate(BaseModel):
         None,
         validation_alias=AliasChoices("extraHours", "extra_hours"),
         serialization_alias="extraHours",
-        description="Extra hours by day of week",
+        description=_DESC_EXTRA_HOURS,
     )
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
         None,
         validation_alias=AliasChoices("specialDays", "special_days"),
         serialization_alias="specialDays",
-        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+        description=_DESC_SPECIAL_DAYS,
     )
     valid_from: date = Field(
         ...,
@@ -187,7 +192,7 @@ class ScheduleCreate(BaseModel):
         serialization_alias="validTo",
         description="End date of schedule validity (None = open-ended)",
     )
-    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+    metadata: Optional[MetadataSchema] = Field(None, description=_DESC_METADATA)
 
     @field_validator("device_id")
     @classmethod
@@ -203,19 +208,19 @@ class ScheduleUpdate(BaseModel):
     """Schema for full schedule replacement (PUT). device_id comes from URL."""
 
     schedule: Dict[str, DayScheduleSchema] = Field(
-        ..., description="Schedule configuration by day"
+        ..., description=_DESC_SCHEDULE_BY_DAY
     )
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
         None,
         validation_alias=AliasChoices("extraHours", "extra_hours"),
         serialization_alias="extraHours",
-        description="Extra hours by day of week",
+        description=_DESC_EXTRA_HOURS,
     )
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
         None,
         validation_alias=AliasChoices("specialDays", "special_days"),
         serialization_alias="specialDays",
-        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+        description=_DESC_SPECIAL_DAYS,
     )
     valid_from: Optional[date] = Field(
         None,
@@ -229,7 +234,7 @@ class ScheduleUpdate(BaseModel):
         serialization_alias="validTo",
         description="New end date of schedule validity",
     )
-    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+    metadata: Optional[MetadataSchema] = Field(None, description=_DESC_METADATA)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -238,19 +243,19 @@ class SchedulePatch(BaseModel):
     """Schema for partial schedule updates (PATCH). All fields optional."""
 
     schedule: Optional[Dict[str, DayScheduleSchema]] = Field(
-        None, description="Schedule configuration by day"
+        None, description=_DESC_SCHEDULE_BY_DAY
     )
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
         None,
         validation_alias=AliasChoices("extraHours", "extra_hours"),
         serialization_alias="extraHours",
-        description="Extra hours by day of week",
+        description=_DESC_EXTRA_HOURS,
     )
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
         None,
         validation_alias=AliasChoices("specialDays", "special_days"),
         serialization_alias="specialDays",
-        description="Special day overrides keyed by ISO date (YYYY-MM-DD)",
+        description=_DESC_SPECIAL_DAYS,
     )
     valid_from: Optional[date] = Field(
         None,
@@ -264,7 +269,7 @@ class SchedulePatch(BaseModel):
         serialization_alias="validTo",
         description="New end date of schedule validity",
     )
-    metadata: Optional[MetadataSchema] = Field(None, description="Schedule metadata")
+    metadata: Optional[MetadataSchema] = Field(None, description=_DESC_METADATA)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -280,13 +285,13 @@ class ScheduleRead(BaseModel):
         None, serialization_alias="deviceName", description="Device name (from devices table)"
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
-        ..., description="Schedule configuration by day"
+        ..., description=_DESC_SCHEDULE_BY_DAY
     )
     extra_hours: Optional[Dict[str, List[ExtraHourSchema]]] = Field(
-        None, serialization_alias="extraHours", description="Extra hours by day of week"
+        None, serialization_alias="extraHours", description=_DESC_EXTRA_HOURS
     )
     special_days: Optional[Dict[str, SpecialDaySchema]] = Field(
-        None, serialization_alias="specialDays", description="Special day overrides keyed by ISO date (YYYY-MM-DD)"
+        None, serialization_alias="specialDays", description=_DESC_SPECIAL_DAYS
     )
     valid_from: date = Field(
         ..., serialization_alias="validFrom", description="Start date of schedule validity"
@@ -294,7 +299,7 @@ class ScheduleRead(BaseModel):
     valid_to: Optional[date] = Field(
         None, serialization_alias="validTo", description="End date of schedule validity"
     )
-    metadata: MetadataSchema = Field(..., description="Schedule metadata")
+    metadata: MetadataSchema = Field(..., description=_DESC_METADATA)
 
     model_config = ConfigDict(populate_by_name=True)
 

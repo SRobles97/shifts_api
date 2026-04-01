@@ -9,7 +9,7 @@ from .config import settings
 from .postgres import get_postgres
 
 
-async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
+def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
     """
     Verify the API key provided in the X-API-Key header.
 
@@ -29,8 +29,8 @@ async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
         )
 
 
-async def get_db_pool() -> asyncpg.Pool:
+def get_db_pool() -> asyncpg.Pool:
     """
     FastAPI dependency that provides the database connection pool.
     """
-    return await get_postgres()
+    return get_postgres()

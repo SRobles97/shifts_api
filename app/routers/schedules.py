@@ -2,29 +2,48 @@
 Schedule API router — thin controllers delegating to the service layer.
 """
 
-from datetime import date, datetime
-from fastapi import APIRouter, HTTPException, Depends, Query, Body
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.openapi.utils import get_openapi
-from typing import List, Optional, Dict, Any
+from datetime import date
+from typing import Annotated, Any, Dict, List, Optional
 
 import asyncpg
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 
-from ..core.dependencies import verify_api_key, get_db_pool
+from ..core.dependencies import get_db_pool, verify_api_key
 from ..schemas.schedule import (
+    AllScheduleStatsResponse,
+    DayScheduleSchema,
     ScheduleCreate,
-    ScheduleUpdate,
+    ScheduleDeleteResponse,
     SchedulePatch,
     ScheduleRead,
-    ScheduleDeleteResponse,
-    AllScheduleStatsResponse,
+    ScheduleUpdate,
     SingleScheduleStatsResponse,
-    DayScheduleSchema,
     SpecialDaySchema,
 )
 from ..services.schedule_service import schedule_service
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
+
+# ── Reusable Annotated types ──────────────────────────────────────────
+
+Pool = Annotated[asyncpg.Pool, Depends(get_db_pool)]
+ApiKey = Annotated[None, Depends(verify_api_key)]
+
+DATE_QUERY_DESC = "Target date (YYYY-MM-DD) to resolve schedule"
+DateQuery = Annotated[Optional[date], Query(alias="date", description=DATE_QUERY_DESC)]
+
+# ── Reusable response docs ────────────────────────────────────────────
+
+_404 = {404: {"description": "Resource not found"}}
+_400 = {400: {"description": "Bad request / validation error"}}
+_500 = {500: {"description": "Internal server error"}}
+
+RESPONSES_400_500 = {**_400, **_500}
+RESPONSES_404_500 = {**_404, **_500}
+RESPONSES_404_400_500 = {**_404, **_400, **_500}
+RESPONSES_500 = {**_500}
 
 
 # ========== Documentation Endpoints ==========
@@ -75,11 +94,11 @@ async def get_schedules_redoc():
 # ========== Schedule CRUD Endpoints ==========
 
 
-@router.post("/", response_model=ScheduleRead)
+@router.post("/", response_model=ScheduleRead, responses=RESPONSES_404_400_500)
 async def create_schedule(
     data: ScheduleCreate,
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Create a schedule for a device (auto-closes previous open-ended schedule)."""
     try:
@@ -92,13 +111,13 @@ async def create_schedule(
         raise HTTPException(status_code=500, detail=f"Error al crear el horario: {e}")
 
 
-@router.put("/{device_id}", response_model=ScheduleRead)
+@router.put("/{device_id}", response_model=ScheduleRead, responses=RESPONSES_404_400_500)
 async def update_schedule(
     device_id: int,
     data: ScheduleUpdate,
-    date_param: Optional[date] = Query(None, alias="date", description="Target date (YYYY-MM-DD) to resolve schedule"),
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
+    date_param: DateQuery = None,
 ):
     """Full replacement of a schedule for a device."""
     try:
@@ -111,13 +130,13 @@ async def update_schedule(
         raise HTTPException(status_code=500, detail=f"Error al actualizar el horario: {e}")
 
 
-@router.patch("/{device_id}", response_model=ScheduleRead)
+@router.patch("/{device_id}", response_model=ScheduleRead, responses=RESPONSES_404_400_500)
 async def patch_schedule(
     device_id: int,
     data: SchedulePatch,
-    date_param: Optional[date] = Query(None, alias="date", description="Target date (YYYY-MM-DD) to resolve schedule"),
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
+    date_param: DateQuery = None,
 ):
     """Partial update of a schedule for a device."""
     try:
@@ -130,11 +149,11 @@ async def patch_schedule(
         raise HTTPException(status_code=500, detail=f"Error al actualizar parcialmente: {e}")
 
 
-@router.get("/by-day/{day}", response_model=List[ScheduleRead])
+@router.get("/by-day/{day}", response_model=List[ScheduleRead], responses=RESPONSES_400_500)
 async def get_schedules_by_day(
     day: str,
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Get all currently effective schedules active on a specific day of the week."""
     try:
@@ -145,10 +164,10 @@ async def get_schedules_by_day(
         raise HTTPException(status_code=500, detail=f"Error al obtener horarios por día: {e}")
 
 
-@router.get("/stats/all", response_model=AllScheduleStatsResponse)
+@router.get("/stats/all", response_model=AllScheduleStatsResponse, responses=RESPONSES_500)
 async def get_all_stats(
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Get work hour usage statistics for all devices."""
     try:
@@ -157,11 +176,11 @@ async def get_all_stats(
         raise HTTPException(status_code=500, detail=f"Error al obtener estadísticas: {e}")
 
 
-@router.get("/stats/{device_id}", response_model=SingleScheduleStatsResponse)
+@router.get("/stats/{device_id}", response_model=SingleScheduleStatsResponse, responses=RESPONSES_404_500)
 async def get_device_stats(
     device_id: int,
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Get work hour usage statistics for a specific device."""
     try:
@@ -172,11 +191,11 @@ async def get_device_stats(
         raise HTTPException(status_code=500, detail=f"Error al obtener estadísticas: {e}")
 
 
-@router.get("/special-days/{device_id}", response_model=Dict[str, Any])
+@router.get("/special-days/{device_id}", response_model=Dict[str, Any], responses=RESPONSES_404_500)
 async def get_special_days(
     device_id: int,
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Get special days for a device."""
     try:
@@ -187,13 +206,13 @@ async def get_special_days(
         raise HTTPException(status_code=500, detail=f"Error al obtener días especiales: {e}")
 
 
-@router.post("/special-days/{device_id}", response_model=ScheduleRead)
+@router.post("/special-days/{device_id}", response_model=ScheduleRead, responses=RESPONSES_404_400_500)
 async def add_special_day(
     device_id: int,
-    date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    special_day: SpecialDaySchema = Body(...),
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    date: Annotated[str, Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$")],
+    special_day: Annotated[SpecialDaySchema, Body(...)],
+    pool: Pool,
+    _: ApiKey,
 ):
     """Add or update a single special day for a device."""
     try:
@@ -206,12 +225,12 @@ async def add_special_day(
         raise HTTPException(status_code=500, detail=f"Error al añadir día especial: {e}")
 
 
-@router.delete("/special-days/{device_id}/{date}", response_model=ScheduleDeleteResponse)
+@router.delete("/special-days/{device_id}/{date}", response_model=ScheduleDeleteResponse, responses=RESPONSES_404_400_500)
 async def delete_special_day(
     device_id: int,
     date: str,
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Delete a specific special day for a device."""
     try:
@@ -224,12 +243,12 @@ async def delete_special_day(
         raise HTTPException(status_code=500, detail=f"Error al eliminar día especial: {e}")
 
 
-@router.get("/effective-schedule/{device_id}/{date}", response_model=Optional[DayScheduleSchema])
+@router.get("/effective-schedule/{device_id}/{date}", response_model=Optional[DayScheduleSchema], responses=RESPONSES_404_400_500)
 async def get_effective_schedule(
     device_id: int,
     date: str,
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Get the effective schedule for a device on a specific date."""
     try:
@@ -242,10 +261,10 @@ async def get_effective_schedule(
         raise HTTPException(status_code=500, detail=f"Error al obtener horario efectivo: {e}")
 
 
-@router.get("/", response_model=List[ScheduleRead])
+@router.get("/", response_model=List[ScheduleRead], responses=RESPONSES_500)
 async def get_all_schedules(
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Get all currently effective schedules."""
     try:
@@ -254,11 +273,11 @@ async def get_all_schedules(
         raise HTTPException(status_code=500, detail=f"Error al obtener los horarios: {e}")
 
 
-@router.get("/{device_id}/history", response_model=List[ScheduleRead])
+@router.get("/{device_id}/history", response_model=List[ScheduleRead], responses=RESPONSES_500)
 async def get_schedule_history(
     device_id: int,
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
 ):
     """Get all schedules (history) for a specific device."""
     try:
@@ -267,12 +286,12 @@ async def get_schedule_history(
         raise HTTPException(status_code=500, detail=f"Error al obtener historial: {e}")
 
 
-@router.get("/{device_id}", response_model=Optional[ScheduleRead])
+@router.get("/{device_id}", response_model=Optional[ScheduleRead], responses=RESPONSES_500)
 async def get_schedule(
     device_id: int,
-    date_param: Optional[date] = Query(None, alias="date", description="Target date (YYYY-MM-DD) to resolve schedule"),
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
+    date_param: DateQuery = None,
 ):
     """Get the schedule for a specific device (current or at a specific date)."""
     try:
@@ -281,12 +300,12 @@ async def get_schedule(
         raise HTTPException(status_code=500, detail=f"Error al obtener el horario: {e}")
 
 
-@router.delete("/{device_id}", response_model=ScheduleDeleteResponse)
+@router.delete("/{device_id}", response_model=ScheduleDeleteResponse, responses=RESPONSES_404_500)
 async def delete_schedule(
     device_id: int,
-    schedule_id: Optional[int] = Query(None, alias="scheduleId", description="Specific schedule ID to delete"),
-    pool: asyncpg.Pool = Depends(get_db_pool),
-    _: None = Depends(verify_api_key),
+    pool: Pool,
+    _: ApiKey,
+    schedule_id: Annotated[Optional[int], Query(alias="scheduleId", description="Specific schedule ID to delete")] = None,
 ):
     """Delete a schedule for a device (current or by specific schedule ID)."""
     try:

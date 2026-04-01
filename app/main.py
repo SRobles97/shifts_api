@@ -55,7 +55,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware
+# Add logging middleware
+app.add_middleware(LoggingMiddleware)
+
+# Add CORS middleware last so it runs first (outermost)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins
@@ -63,9 +66,6 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all methods
     allow_headers=["*"],  # Allow all headers
 )
-
-# Add logging middleware
-app.add_middleware(LoggingMiddleware)
 
 # Include routers
 app.include_router(schedules_router, prefix="/shifts-api/v1")

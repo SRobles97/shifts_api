@@ -13,13 +13,42 @@ from enum import Enum
 import re
 
 
-_TIME_RE = re.compile(r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+_INVALID_TIME_MSG = "Time must be in HH:MM format"
 
 
 def _parse_hhmm(value: str) -> datetime:
     """Parse 'HH:MM' to a datetime (today's date)."""
     return datetime.strptime(value, "%H:%M")
+
+
+def _validate_breaks_within_work_hours(
+    breaks: List["Break"], work_hours: "WorkHours"
+) -> None:
+    """Validate that all breaks fall within work hours and don't overlap."""
+    work_start_dt = _parse_hhmm(work_hours.start)
+    work_end_dt = _parse_hhmm(work_hours.end)
+
+    for b in breaks:
+        break_start_dt = _parse_hhmm(b.start)
+        break_end_dt = break_start_dt + timedelta(minutes=b.duration_minutes)
+
+        if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
+            raise ValueError("Break must start within work hours")
+        if break_end_dt > work_end_dt:
+            raise ValueError("Break must end within work hours")
+
+    sorted_breaks = sorted(breaks, key=lambda b: _parse_hhmm(b.start))
+    last_end: Optional[datetime] = None
+    for b in sorted_breaks:
+        start_dt = _parse_hhmm(b.start)
+        end_dt = start_dt + timedelta(minutes=b.duration_minutes)
+        if last_end and start_dt < last_end:
+            raise ValueError(f"Overlapping breaks: {b.start}")
+        last_end = end_dt
 
 
 class RecurrencePattern(str, Enum):
@@ -52,7 +81,7 @@ class WorkHours(BaseModel):
     def validate_time_format(cls, v: str) -> str:
         """Validate time format is HH:MM."""
         if not _TIME_RE.match(v):
-            raise ValueError("Time must be in HH:MM format")
+            raise ValueError(_INVALID_TIME_MSG)
         return v
 
     @field_validator("end")
@@ -89,7 +118,7 @@ class Break(BaseModel):
     def validate_time_format(cls, v: str) -> str:
         """Validate time format is HH:MM."""
         if not _TIME_RE.match(v):
-            raise ValueError("Time must be in HH:MM format")
+            raise ValueError(_INVALID_TIME_MSG)
         return v
 
     @field_validator("duration_minutes")
@@ -122,7 +151,7 @@ class ExtraHour(BaseModel):
     def validate_time_format(cls, v: str) -> str:
         """Validate time format is HH:MM."""
         if not _TIME_RE.match(v):
-            raise ValueError("Time must be in HH:MM format")
+            raise ValueError(_INVALID_TIME_MSG)
         return v
 
     @field_validator("end")
@@ -162,28 +191,7 @@ class DaySchedule(BaseModel):
             return v
         work_hours: WorkHours = info.data.get("work_hours")
         if work_hours:
-            work_start_dt = _parse_hhmm(work_hours.start)
-            work_end_dt = _parse_hhmm(work_hours.end)
-
-            for b in v:
-                break_start_dt = _parse_hhmm(b.start)
-                break_end_dt = break_start_dt + timedelta(minutes=b.duration_minutes)
-
-                if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
-                    raise ValueError("Break must start within work hours")
-                if break_end_dt > work_end_dt:
-                    raise ValueError("Break must end within work hours")
-
-            # Check for overlaps (same logic as extra_hours)
-            sorted_breaks = sorted(v, key=lambda b: _parse_hhmm(b.start))
-            last_end: Optional[datetime] = None
-            for b in sorted_breaks:
-                start_dt = _parse_hhmm(b.start)
-                end_dt = start_dt + timedelta(minutes=b.duration_minutes)
-                if last_end and start_dt < last_end:
-                    raise ValueError(f"Overlapping breaks: {b.start}")
-                last_end = end_dt
-
+            _validate_breaks_within_work_hours(v, work_hours)
         return v
 
     def total_work_minutes(self) -> int:
@@ -225,33 +233,12 @@ class SpecialDay(BaseModel):
     @classmethod
     def validate_breaks_require_work_hours(cls, v: Optional[List[Break]], info: ValidationInfo) -> Optional[List[Break]]:
         """Breaks require work_hours to be set."""
+        if not v:
+            return v
         work_hours = info.data.get("work_hours")
-        if v and not work_hours:
+        if not work_hours:
             raise ValueError("Breaks cannot be set without work hours")
-
-        if v and work_hours:
-            work_start_dt = _parse_hhmm(work_hours.start)
-            work_end_dt = _parse_hhmm(work_hours.end)
-
-            for b in v:
-                break_start_dt = _parse_hhmm(b.start)
-                break_end_dt = break_start_dt + timedelta(minutes=b.duration_minutes)
-
-                if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
-                    raise ValueError("Break must start within work hours")
-                if break_end_dt > work_end_dt:
-                    raise ValueError("Break must end within work hours")
-
-            # Check for overlaps
-            sorted_breaks = sorted(v, key=lambda b: _parse_hhmm(b.start))
-            last_end: Optional[datetime] = None
-            for b in sorted_breaks:
-                start_dt = _parse_hhmm(b.start)
-                end_dt = start_dt + timedelta(minutes=b.duration_minutes)
-                if last_end and start_dt < last_end:
-                    raise ValueError(f"Overlapping breaks: {b.start}")
-                last_end = end_dt
-
+        _validate_breaks_within_work_hours(v, work_hours)
         return v
 
     @field_validator("recurrence_pattern")

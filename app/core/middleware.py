@@ -25,7 +25,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         # Log del request entrante
         logger.info(
-            f"Request started",
+            "Request started",
             extra={
                 "request_id": request_id,
                 "method": method,
@@ -44,7 +44,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
             # Log del response
             logger.info(
-                f"Request completed",
+                "Request completed",
                 extra={
                     "request_id": request_id,
                     "method": method,
