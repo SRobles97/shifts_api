@@ -176,6 +176,7 @@ def _build_schedule_read(db_record: dict) -> ScheduleRead:
         id=str(db_record["id"]),
         device_id=db_record["device_id"],
         device_name=db_record.get("device_name"),
+        shift_type=db_record.get("shift_type", "day"),
         schedule=day_schedules_dict,
         extra_hours=extra_hours_dict,
         special_days=special_days_dict,
@@ -189,8 +190,15 @@ def _build_schedule_read(db_record: dict) -> ScheduleRead:
     )
 
 
+def _normalize_minute(m: int, work_start_min: int, crosses_midnight: bool) -> int:
+    """Normalize a minute value for cross-midnight comparison."""
+    if crosses_midnight and m < work_start_min:
+        return m + 24 * 60
+    return m
+
+
 def _calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> dict:
-    """Calculate work hours usage statistics for a schedule."""
+    """Calculate work hours usage statistics for a schedule (handles cross-midnight)."""
     current_day = current_time.strftime("%A").lower()
     current_time_obj = current_time.time()
     current_time_str = current_time_obj.strftime("%H:%M")
@@ -225,26 +233,37 @@ def _calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> di
 
     work_start_minutes = _time_to_minutes(work_start)
     work_end_minutes = _time_to_minutes(work_end)
+
+    # Handle cross-midnight schedules (e.g. 22:00→06:00)
+    crosses_midnight = work_end_minutes <= work_start_minutes
+    if crosses_midnight:
+        work_end_minutes += 24 * 60
+
     total_work_minutes = work_end_minutes - work_start_minutes - total_break_duration
     total_work_hours = total_work_minutes / 60.0
 
     current_minutes = _time_to_minutes(current_time_obj)
+    current_norm = _normalize_minute(current_minutes, work_start_minutes, crosses_midnight)
 
-    if current_minutes < work_start_minutes:
+    if current_norm < work_start_minutes:
         hours_used = 0.0
         usage_percentage = 0.0
-    elif current_minutes >= work_end_minutes:
+    elif current_norm >= work_end_minutes:
         hours_used = total_work_hours
         usage_percentage = 100.0
     else:
-        work_minutes_elapsed = current_minutes - work_start_minutes
+        work_minutes_elapsed = current_norm - work_start_minutes
         for b in breaks_data:
-            b_start = _time_to_minutes(_parse_time_string(b["start"]))
+            b_start = _normalize_minute(
+                _time_to_minutes(_parse_time_string(b["start"])),
+                work_start_minutes,
+                crosses_midnight,
+            )
             b_dur = b["durationMinutes"]
-            if current_minutes > b_start + b_dur:
+            if current_norm > b_start + b_dur:
                 work_minutes_elapsed -= b_dur
-            elif current_minutes > b_start:
-                work_minutes_elapsed -= current_minutes - b_start
+            elif current_norm > b_start:
+                work_minutes_elapsed -= current_norm - b_start
 
         hours_used = max(0, work_minutes_elapsed) / 60.0
         usage_percentage = (
@@ -299,6 +318,7 @@ def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
     return ScheduleEntity(
         id=db_record["id"],
         device_id=db_record["device_id"],
+        shift_type=db_record.get("shift_type", "day"),
         schedule=Schedule(day_schedules=day_schedules_dict),
         extra_hours=extra_hours_dict,
         special_days=special_days_dict,
@@ -336,6 +356,7 @@ class ScheduleService:
 
         schedule_data = {
             "device_id": device_id,
+            "shift_type": data.shift_type,
             "day_schedules": _serialize_day_schedules(data.schedule),
             "extra_hours": _serialize_extra_hours(data.extra_hours),
             "special_days": _serialize_special_days(data.special_days),
@@ -355,12 +376,13 @@ class ScheduleService:
 
     @staticmethod
     async def get_schedule(
-        pool: asyncpg.Pool, device_id: int, target_date: Optional[date] = None
+        pool: asyncpg.Pool, device_id: int, target_date: Optional[date] = None,
+        shift_type: str = "day",
     ) -> Optional[ScheduleRead]:
         if target_date:
-            db_record = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
+            db_record = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date, shift_type)
         else:
-            db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
+            db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:
             return None
         return _build_schedule_read(db_record)
@@ -374,14 +396,14 @@ class ScheduleService:
     @staticmethod
     async def update_schedule(
         pool: asyncpg.Pool, device_id: int, data: ScheduleUpdate,
-        target_date: Optional[date] = None,
+        target_date: Optional[date] = None, shift_type: str = "day",
     ) -> ScheduleRead:
         if target_date:
-            existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
+            existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date, shift_type)
         else:
-            existing = await schedule_crud.get_current_by_device_id(pool, device_id)
+            existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not existing:
-            raise LookupError(f"Schedule for device_id={device_id} not found")
+            raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
 
         schedule_id = existing["id"]
         update_data: Dict[str, Any] = {
@@ -392,6 +414,8 @@ class ScheduleService:
             "source": data.metadata.source if data.metadata else "ui",
         }
 
+        if data.shift_type is not None:
+            update_data["shift_type"] = data.shift_type
         if data.valid_from is not None:
             update_data["valid_from"] = data.valid_from
         if data.valid_to is not None:
@@ -405,17 +429,20 @@ class ScheduleService:
     @staticmethod
     async def patch_schedule(
         pool: asyncpg.Pool, device_id: int, data: SchedulePatch,
-        target_date: Optional[date] = None,
+        target_date: Optional[date] = None, shift_type: str = "day",
     ) -> ScheduleRead:
         if target_date:
-            existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
+            existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date, shift_type)
         else:
-            existing = await schedule_crud.get_current_by_device_id(pool, device_id)
+            existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not existing:
-            raise LookupError(f"Schedule for device_id={device_id} not found")
+            raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
 
         schedule_id = existing["id"]
         update_data: Dict[str, Any] = {}
+
+        if data.shift_type is not None:
+            update_data["shift_type"] = data.shift_type
 
         if data.schedule is not None:
             update_data["day_schedules"] = _serialize_day_schedules(data.schedule)
@@ -459,14 +486,15 @@ class ScheduleService:
 
     @staticmethod
     async def delete_schedule(
-        pool: asyncpg.Pool, device_id: int, schedule_id: Optional[int] = None
+        pool: asyncpg.Pool, device_id: int, schedule_id: Optional[int] = None,
+        shift_type: str = "day",
     ) -> bool:
         if schedule_id:
             deleted = await schedule_crud.delete_by_id(pool, schedule_id)
         else:
-            deleted = await schedule_crud.delete_current_by_device_id(pool, device_id)
+            deleted = await schedule_crud.delete_current_by_device_id(pool, device_id, shift_type)
         if not deleted:
-            raise LookupError(f"Schedule for device_id={device_id} not found")
+            raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
         return True
 
     @staticmethod
@@ -486,12 +514,12 @@ class ScheduleService:
 
     @staticmethod
     async def get_device_stats(
-        pool: asyncpg.Pool, device_id: int
+        pool: asyncpg.Pool, device_id: int, shift_type: str = "day",
     ) -> SingleScheduleStatsResponse:
         current_time = datetime.now()
-        db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
+        db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:
-            raise LookupError(f"Schedule for device_id={device_id} not found")
+            raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
 
         stats = _calculate_work_hours_usage(db_record, current_time)
         device_stats = ScheduleStatsSchema(**stats)
@@ -502,10 +530,12 @@ class ScheduleService:
         )
 
     @staticmethod
-    async def get_special_days(pool: asyncpg.Pool, device_id: int) -> Dict[str, Any]:
-        result = await schedule_crud.get_special_days(pool, device_id)
+    async def get_special_days(
+        pool: asyncpg.Pool, device_id: int, shift_type: str = "day",
+    ) -> Dict[str, Any]:
+        result = await schedule_crud.get_special_days(pool, device_id, shift_type)
         if result is None:
-            raise LookupError(f"Schedule for device_id={device_id} not found")
+            raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
         return result
 
     @staticmethod
@@ -514,11 +544,12 @@ class ScheduleService:
         device_id: int,
         date_str: str,
         special_day: SpecialDaySchema,
+        shift_type: str = "day",
     ) -> ScheduleRead:
         if not _DATE_RE.match(date_str):
             raise ValueError(_INVALID_DATE_FMT)
 
-        db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
+        db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
 
@@ -541,12 +572,13 @@ class ScheduleService:
 
     @staticmethod
     async def delete_special_day(
-        pool: asyncpg.Pool, device_id: int, date_str: str
+        pool: asyncpg.Pool, device_id: int, date_str: str,
+        shift_type: str = "day",
     ) -> ScheduleDeleteResponse:
         if not _DATE_RE.match(date_str):
             raise ValueError(_INVALID_DATE_FMT)
 
-        db_record = await schedule_crud.get_current_by_device_id(pool, device_id)
+        db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
 
@@ -574,14 +606,15 @@ class ScheduleService:
 
     @staticmethod
     async def get_effective_schedule(
-        pool: asyncpg.Pool, device_id: int, date_str: str
+        pool: asyncpg.Pool, device_id: int, date_str: str,
+        shift_type: str = "day",
     ) -> Optional[DayScheduleSchema]:
         if not _DATE_RE.match(date_str):
             raise ValueError(_INVALID_DATE_FMT)
 
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
 
-        db_record = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date)
+        db_record = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date, shift_type)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
 

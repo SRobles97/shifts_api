@@ -37,9 +37,15 @@ class TestWorkHours:
         with pytest.raises(ValidationError):
             WorkHours(start="8am", end="17:00")
 
-    def test_end_before_start(self):
-        with pytest.raises(ValidationError):
-            WorkHours(start="17:00", end="08:00")
+    def test_cross_midnight(self):
+        wh = WorkHours(start="22:00", end="06:00")
+        assert wh.crosses_midnight() is True
+        assert wh.duration_minutes() == 480  # 8 hours
+
+    def test_cross_midnight_short(self):
+        wh = WorkHours(start="23:00", end="01:00")
+        assert wh.crosses_midnight() is True
+        assert wh.duration_minutes() == 120  # 2 hours
 
     def test_end_equal_start(self):
         with pytest.raises(ValidationError):
@@ -138,9 +144,9 @@ class TestExtraHour:
         eh = ExtraHour(start="18:00", end="20:00")
         assert eh.duration_minutes() == 120
 
-    def test_end_before_start(self):
-        with pytest.raises(ValidationError):
-            ExtraHour(start="20:00", end="18:00")
+    def test_cross_midnight(self):
+        eh = ExtraHour(start="23:00", end="01:00")
+        assert eh.duration_minutes() == 120
 
 
 # ==================== SpecialDay ====================

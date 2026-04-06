@@ -77,6 +77,7 @@ async def init_db():
                     (
                         id            BIGSERIAL    PRIMARY KEY,
                         device_id     BIGINT       NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                        shift_type    TEXT         NOT NULL DEFAULT 'day',
                         day_schedules JSONB        NOT NULL,
                         extra_hours   JSONB,
                         special_days  JSONB,
@@ -89,8 +90,8 @@ async def init_db():
                         source        TEXT         NOT NULL DEFAULT 'ui',
                         created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
                         updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-                        CONSTRAINT excl_device_date_overlap
-                            EXCLUDE USING gist (device_id WITH =, valid_range WITH &&)
+                        CONSTRAINT excl_device_shift_date_overlap
+                            EXCLUDE USING gist (device_id WITH =, shift_type WITH =, valid_range WITH &&)
                     );
                     """
                 )
@@ -121,6 +122,12 @@ async def init_db():
                     ON device_schedules (created_at DESC);
                     """
                 )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_device_schedules_shift_type
+                    ON device_schedules (device_id, shift_type);
+                    """
+                )
                 logger.info("Índices de 'device_schedules' creados correctamente.")
 
                 # Migrate data from old schedules table if it exists
@@ -146,6 +153,40 @@ async def init_db():
 
             else:
                 logger.info("Tabla 'device_schedules' ya existe.")
+
+                # Migrate: add shift_type column if missing
+                has_shift_type = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'device_schedules'
+                          AND column_name = 'shift_type'
+                    );
+                    """
+                )
+                if not has_shift_type:
+                    logger.info("Añadiendo columna 'shift_type' a 'device_schedules'...")
+                    await conn.execute(
+                        "ALTER TABLE device_schedules ADD COLUMN shift_type TEXT NOT NULL DEFAULT 'day';"
+                    )
+                    # Recreate exclusion constraint with shift_type
+                    await conn.execute(
+                        "ALTER TABLE device_schedules DROP CONSTRAINT IF EXISTS excl_device_date_overlap;"
+                    )
+                    await conn.execute(
+                        """
+                        ALTER TABLE device_schedules
+                        ADD CONSTRAINT excl_device_shift_date_overlap
+                        EXCLUDE USING gist (device_id WITH =, shift_type WITH =, valid_range WITH &&);
+                        """
+                    )
+                    await conn.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_device_schedules_shift_type
+                        ON device_schedules (device_id, shift_type);
+                        """
+                    )
+                    logger.info("Columna 'shift_type' y constraint actualizados.")
 
             # Configurar optimizaciones específicas de TimescaleDB
             await setup_timescaledb(conn)

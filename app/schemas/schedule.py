@@ -164,6 +164,12 @@ class ScheduleCreate(BaseModel):
         serialization_alias="deviceName",
         description="Device name — resolved to device_id automatically",
     )
+    shift_type: str = Field(
+        default="day",
+        validation_alias=AliasChoices("shiftType", "shift_type"),
+        serialization_alias="shiftType",
+        description="Shift type label: 'day' or 'night'",
+    )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ...,
         description="Schedule configuration by day (e.g., {'monday': {...}, 'tuesday': {...}})",
@@ -207,6 +213,12 @@ class ScheduleCreate(BaseModel):
 class ScheduleUpdate(BaseModel):
     """Schema for full schedule replacement (PUT). device_id comes from URL."""
 
+    shift_type: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("shiftType", "shift_type"),
+        serialization_alias="shiftType",
+        description="Shift type label: 'day' or 'night'",
+    )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ..., description=_DESC_SCHEDULE_BY_DAY
     )
@@ -242,6 +254,12 @@ class ScheduleUpdate(BaseModel):
 class SchedulePatch(BaseModel):
     """Schema for partial schedule updates (PATCH). All fields optional."""
 
+    shift_type: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("shiftType", "shift_type"),
+        serialization_alias="shiftType",
+        description="Shift type label: 'day' or 'night'",
+    )
     schedule: Optional[Dict[str, DayScheduleSchema]] = Field(
         None, description=_DESC_SCHEDULE_BY_DAY
     )
@@ -283,6 +301,9 @@ class ScheduleRead(BaseModel):
     )
     device_name: Optional[str] = Field(
         None, serialization_alias="deviceName", description="Device name (from devices table)"
+    )
+    shift_type: str = Field(
+        default="day", serialization_alias="shiftType", description="Shift type label: 'day' or 'night'"
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ..., description=_DESC_SCHEDULE_BY_DAY

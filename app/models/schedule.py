@@ -25,30 +25,51 @@ def _parse_hhmm(value: str) -> datetime:
     return datetime.strptime(value, "%H:%M")
 
 
+def _time_to_day_minutes(t: str) -> int:
+    """Convert HH:MM to minutes since midnight."""
+    dt = _parse_hhmm(t)
+    return dt.hour * 60 + dt.minute
+
+
+def _normalize_minute(m: int, work_start_min: int, crosses_midnight: bool) -> int:
+    """Normalize a minute value relative to work_start for cross-midnight comparison."""
+    if crosses_midnight and m < work_start_min:
+        return m + 24 * 60
+    return m
+
+
 def _validate_breaks_within_work_hours(
     breaks: List["Break"], work_hours: "WorkHours"
 ) -> None:
-    """Validate that all breaks fall within work hours and don't overlap."""
-    work_start_dt = _parse_hhmm(work_hours.start)
-    work_end_dt = _parse_hhmm(work_hours.end)
+    """Validate that all breaks fall within work hours and don't overlap.
+    Handles cross-midnight work hours (e.g. 22:00→06:00)."""
+    work_start_min = _time_to_day_minutes(work_hours.start)
+    work_end_min = _time_to_day_minutes(work_hours.end)
+    crosses = work_end_min <= work_start_min
+
+    if crosses:
+        work_end_min += 24 * 60
 
     for b in breaks:
-        break_start_dt = _parse_hhmm(b.start)
-        break_end_dt = break_start_dt + timedelta(minutes=b.duration_minutes)
+        b_start = _normalize_minute(_time_to_day_minutes(b.start), work_start_min, crosses)
+        b_end = b_start + b.duration_minutes
 
-        if not (work_start_dt.time() <= break_start_dt.time() <= work_end_dt.time()):
+        if not (work_start_min <= b_start < work_end_min):
             raise ValueError("Break must start within work hours")
-        if break_end_dt > work_end_dt:
+        if b_end > work_end_min:
             raise ValueError("Break must end within work hours")
 
-    sorted_breaks = sorted(breaks, key=lambda b: _parse_hhmm(b.start))
-    last_end: Optional[datetime] = None
+    sorted_breaks = sorted(
+        breaks,
+        key=lambda b: _normalize_minute(_time_to_day_minutes(b.start), work_start_min, crosses),
+    )
+    last_end: Optional[int] = None
     for b in sorted_breaks:
-        start_dt = _parse_hhmm(b.start)
-        end_dt = start_dt + timedelta(minutes=b.duration_minutes)
-        if last_end and start_dt < last_end:
+        b_start = _normalize_minute(_time_to_day_minutes(b.start), work_start_min, crosses)
+        b_end = b_start + b.duration_minutes
+        if last_end and b_start < last_end:
             raise ValueError(f"Overlapping breaks: {b.start}")
-        last_end = end_dt
+        last_end = b_end
 
 
 class RecurrencePattern(str, Enum):
@@ -86,21 +107,27 @@ class WorkHours(BaseModel):
 
     @field_validator("end")
     @classmethod
-    def end_after_start(cls, v: str, info: ValidationInfo) -> str:
-        """Ensure end time is after start time."""
+    def end_not_equal_start(cls, v: str, info: ValidationInfo) -> str:
+        """Ensure end time is not equal to start time."""
         start = info.data.get("start")
-        if start:
-            start_time = _parse_hhmm(start).time()
-            end_time = _parse_hhmm(v).time()
-            if end_time <= start_time:
-                raise ValueError("End time must be after start time")
+        if start and v == start:
+            raise ValueError("End time must differ from start time")
         return v
 
+    def crosses_midnight(self) -> bool:
+        """Check if work hours cross midnight (e.g. 22:00→06:00)."""
+        start_time = _parse_hhmm(self.start).time()
+        end_time = _parse_hhmm(self.end).time()
+        return end_time <= start_time
+
     def duration_minutes(self) -> int:
-        """Calculate work duration in minutes."""
+        """Calculate work duration in minutes (handles cross-midnight)."""
         start_dt = _parse_hhmm(self.start)
         end_dt = _parse_hhmm(self.end)
-        return int((end_dt - start_dt).total_seconds() // 60)
+        diff = int((end_dt - start_dt).total_seconds() // 60)
+        if diff <= 0:
+            diff += 24 * 60
+        return diff
 
 
 class Break(BaseModel):
@@ -156,21 +183,21 @@ class ExtraHour(BaseModel):
 
     @field_validator("end")
     @classmethod
-    def end_after_start(cls, v: str, info: ValidationInfo) -> str:
-        """Ensure end time is after start time."""
+    def end_not_equal_start(cls, v: str, info: ValidationInfo) -> str:
+        """Ensure end time is not equal to start time."""
         start = info.data.get("start")
-        if start:
-            start_time = _parse_hhmm(start).time()
-            end_time = _parse_hhmm(v).time()
-            if end_time <= start_time:
-                raise ValueError("End time must be after start time")
+        if start and v == start:
+            raise ValueError("End time must differ from start time")
         return v
 
     def duration_minutes(self) -> int:
-        """Calculate extra hour duration in minutes."""
+        """Calculate extra hour duration in minutes (handles cross-midnight)."""
         start_dt = _parse_hhmm(self.start)
         end_dt = _parse_hhmm(self.end)
-        return int((end_dt - start_dt).total_seconds() // 60)
+        diff = int((end_dt - start_dt).total_seconds() // 60)
+        if diff <= 0:
+            diff += 24 * 60
+        return diff
 
 
 class DaySchedule(BaseModel):
@@ -336,6 +363,7 @@ class ScheduleEntity(BaseModel):
 
     id: Optional[int] = None
     device_id: int = Field(..., description="Device identifier (FK to devices table)")
+    shift_type: str = Field(default="day", description="Shift type label (e.g. 'day', 'night')")
     schedule: Schedule = Field(..., description="Basic schedule configuration")
     extra_hours: Optional[Dict[str, List[ExtraHour]]] = Field(
         None, description="Extra hours by day of week"
@@ -349,6 +377,16 @@ class ScheduleEntity(BaseModel):
     updated_at: Optional[datetime] = None
     version: str = Field(default="1.0", description="Schedule version")
     source: str = Field(default="ui", description="Schedule source")
+
+    VALID_SHIFT_TYPES: ClassVar[List[str]] = ["day", "night"]
+
+    @field_validator("shift_type")
+    @classmethod
+    def validate_shift_type(cls, v: str) -> str:
+        """Validate shift_type is a known value."""
+        if v not in cls.VALID_SHIFT_TYPES:
+            raise ValueError(f"shift_type must be one of {cls.VALID_SHIFT_TYPES}")
+        return v
 
     @field_validator("valid_to")
     @classmethod

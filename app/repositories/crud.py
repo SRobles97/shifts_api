@@ -30,13 +30,14 @@ class ScheduleCRUD:
             result = await conn.fetchval(
                 """
                 INSERT INTO device_schedules (
-                    device_id, day_schedules, extra_hours, special_days,
+                    device_id, shift_type, day_schedules, extra_hours, special_days,
                     valid_from, valid_to, version, source, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
                 RETURNING id;
                 """,
                 schedule_data["device_id"],
+                schedule_data.get("shift_type", "day"),
                 schedule_data["day_schedules"],
                 schedule_data.get("extra_hours"),
                 schedule_data.get("special_days"),
@@ -55,14 +56,15 @@ class ScheduleCRUD:
         Atomically close the previous open-ended schedule and insert a new one.
 
         Sets valid_to = new_valid_from - 1 day on the previous open-ended schedule
-        for the same device, then inserts the new schedule.
+        for the same device and shift_type, then inserts the new schedule.
 
         Returns:
             ID of the created schedule
         """
+        shift_type = schedule_data.get("shift_type", "day")
         async with pool.acquire() as conn:
             async with conn.transaction():
-                # Close previous open-ended schedule
+                # Close previous open-ended schedule (scoped by shift_type)
                 new_valid_from = schedule_data["valid_from"]
                 await conn.execute(
                     """
@@ -70,24 +72,27 @@ class ScheduleCRUD:
                     SET valid_to = $2::date - INTERVAL '1 day',
                         updated_at = NOW()
                     WHERE device_id = $1
+                      AND shift_type = $3
                       AND valid_to IS NULL
                       AND valid_from < $2::date;
                     """,
                     schedule_data["device_id"],
                     new_valid_from,
+                    shift_type,
                 )
 
                 # Insert new schedule
                 result = await conn.fetchval(
                     """
                     INSERT INTO device_schedules (
-                        device_id, day_schedules, extra_hours, special_days,
+                        device_id, shift_type, day_schedules, extra_hours, special_days,
                         valid_from, valid_to, version, source, updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
                     RETURNING id;
                     """,
                     schedule_data["device_id"],
+                    shift_type,
                     schedule_data["day_schedules"],
                     schedule_data.get("extra_hours"),
                     schedule_data.get("special_days"),
@@ -98,7 +103,8 @@ class ScheduleCRUD:
                 )
 
                 logger.info(
-                    f"Schedule created with auto-close for device_id={schedule_data['device_id']} (id={result})"
+                    f"Schedule created with auto-close for device_id={schedule_data['device_id']} "
+                    f"shift_type={shift_type} (id={result})"
                 )
                 return result
 
@@ -108,7 +114,7 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             return await conn.fetchrow(
                 """
-                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
                        d.device_key AS device_name
                 FROM device_schedules s
@@ -119,42 +125,49 @@ class ScheduleCRUD:
             )
 
     @staticmethod
-    async def get_current_by_device_id(pool: asyncpg.Pool, device_id: int) -> Optional[asyncpg.Record]:
+    async def get_current_by_device_id(
+        pool: asyncpg.Pool, device_id: int, shift_type: str = "day",
+    ) -> Optional[asyncpg.Record]:
         """
-        Get the currently effective schedule for a device (valid_range @> CURRENT_DATE).
+        Get the currently effective schedule for a device and shift_type
+        (valid_range @> CURRENT_DATE).
         """
         async with pool.acquire() as conn:
             return await conn.fetchrow(
                 """
-                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
                        d.device_key AS device_name
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
+                  AND s.shift_type = $2
                   AND s.valid_range @> CURRENT_DATE;
                 """,
                 device_id,
+                shift_type,
             )
 
     @staticmethod
     async def get_by_device_id_and_date(
-        pool: asyncpg.Pool, device_id: int, target_date: date
+        pool: asyncpg.Pool, device_id: int, target_date: date, shift_type: str = "day",
     ) -> Optional[asyncpg.Record]:
         """Get the schedule for a device effective on a specific date."""
         async with pool.acquire() as conn:
             return await conn.fetchrow(
                 """
-                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
                        d.device_key AS device_name
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
+                  AND s.shift_type = $3
                   AND s.valid_range @> $2::date;
                 """,
                 device_id,
                 target_date,
+                shift_type,
             )
 
     @staticmethod
@@ -163,30 +176,30 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
                        d.device_key AS device_name
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
-                ORDER BY s.valid_from DESC;
+                ORDER BY s.valid_from DESC, s.shift_type;
                 """,
                 device_id,
             )
 
     @staticmethod
     async def get_all_current(pool: asyncpg.Pool) -> List[asyncpg.Record]:
-        """Get all currently effective schedules (one per device)."""
+        """Get all currently effective schedules (may return multiple per device if day+night)."""
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
                        d.device_key AS device_name
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.valid_range @> CURRENT_DATE
-                ORDER BY s.device_id;
+                ORDER BY s.device_id, s.shift_type;
                 """
             )
 
@@ -196,14 +209,14 @@ class ScheduleCRUD:
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                SELECT s.id, s.device_id, s.day_schedules, s.extra_hours, s.special_days,
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
                        d.device_key AS device_name
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.day_schedules ? $1
                   AND s.valid_range @> CURRENT_DATE
-                ORDER BY s.device_id;
+                ORDER BY s.device_id, s.shift_type;
                 """,
                 day,
             )
@@ -253,19 +266,23 @@ class ScheduleCRUD:
             return True
 
     @staticmethod
-    async def delete_current_by_device_id(pool: asyncpg.Pool, device_id: int) -> bool:
-        """Delete the currently effective schedule for a device."""
+    async def delete_current_by_device_id(
+        pool: asyncpg.Pool, device_id: int, shift_type: str = "day",
+    ) -> bool:
+        """Delete the currently effective schedule for a device and shift_type."""
         async with pool.acquire() as conn:
             result = await conn.execute(
                 """
                 DELETE FROM device_schedules
                 WHERE device_id = $1
+                  AND shift_type = $2
                   AND valid_range @> CURRENT_DATE;
                 """,
                 device_id,
+                shift_type,
             )
             deleted_count = int(result.split()[-1])
-            logger.info(f"Current schedule for device_id={device_id} deleted: {deleted_count > 0}")
+            logger.info(f"Current schedule for device_id={device_id} shift_type={shift_type} deleted: {deleted_count > 0}")
             return deleted_count > 0
 
     @staticmethod
@@ -281,16 +298,20 @@ class ScheduleCRUD:
             return deleted_count > 0
 
     @staticmethod
-    async def get_special_days(pool: asyncpg.Pool, device_id: int) -> Optional[Dict[str, Any]]:
-        """Get special_days JSONB for the current schedule of a device."""
+    async def get_special_days(
+        pool: asyncpg.Pool, device_id: int, shift_type: str = "day",
+    ) -> Optional[Dict[str, Any]]:
+        """Get special_days JSONB for the current schedule of a device and shift_type."""
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT special_days FROM device_schedules
                 WHERE device_id = $1
+                  AND shift_type = $2
                   AND valid_range @> CURRENT_DATE;
                 """,
                 device_id,
+                shift_type,
             )
             if row is None:
                 return None

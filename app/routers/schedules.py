@@ -34,6 +34,9 @@ ApiKey = Annotated[None, Depends(verify_api_key)]
 DATE_QUERY_DESC = "Target date (YYYY-MM-DD) to resolve schedule"
 DateQuery = Annotated[Optional[date], Query(alias="date", description=DATE_QUERY_DESC)]
 
+SHIFT_TYPE_DESC = "Shift type: 'day' or 'night' (defaults to 'day')"
+ShiftTypeQuery = Annotated[str, Query(alias="shiftType", description=SHIFT_TYPE_DESC)]
+
 # ── Reusable response docs ────────────────────────────────────────────
 
 _404 = {404: {"description": "Resource not found"}}
@@ -118,10 +121,11 @@ async def update_schedule(
     pool: Pool,
     _: ApiKey,
     date_param: DateQuery = None,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Full replacement of a schedule for a device."""
     try:
-        return await schedule_service.update_schedule(pool, device_id, data, target_date=date_param)
+        return await schedule_service.update_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -137,10 +141,11 @@ async def patch_schedule(
     pool: Pool,
     _: ApiKey,
     date_param: DateQuery = None,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Partial update of a schedule for a device."""
     try:
-        return await schedule_service.patch_schedule(pool, device_id, data, target_date=date_param)
+        return await schedule_service.patch_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -181,10 +186,11 @@ async def get_device_stats(
     device_id: int,
     pool: Pool,
     _: ApiKey,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Get work hour usage statistics for a specific device."""
     try:
-        return await schedule_service.get_device_stats(pool, device_id)
+        return await schedule_service.get_device_stats(pool, device_id, shift_type=shift_type)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -196,10 +202,11 @@ async def get_special_days(
     device_id: int,
     pool: Pool,
     _: ApiKey,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Get special days for a device."""
     try:
-        return await schedule_service.get_special_days(pool, device_id)
+        return await schedule_service.get_special_days(pool, device_id, shift_type=shift_type)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -213,10 +220,11 @@ async def add_special_day(
     special_day: Annotated[SpecialDaySchema, Body(...)],
     pool: Pool,
     _: ApiKey,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Add or update a single special day for a device."""
     try:
-        return await schedule_service.add_special_day(pool, device_id, date, special_day)
+        return await schedule_service.add_special_day(pool, device_id, date, special_day, shift_type=shift_type)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -231,10 +239,11 @@ async def delete_special_day(
     date: str,
     pool: Pool,
     _: ApiKey,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Delete a specific special day for a device."""
     try:
-        return await schedule_service.delete_special_day(pool, device_id, date)
+        return await schedule_service.delete_special_day(pool, device_id, date, shift_type=shift_type)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -249,10 +258,11 @@ async def get_effective_schedule(
     date: str,
     pool: Pool,
     _: ApiKey,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Get the effective schedule for a device on a specific date."""
     try:
-        return await schedule_service.get_effective_schedule(pool, device_id, date)
+        return await schedule_service.get_effective_schedule(pool, device_id, date, shift_type=shift_type)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -292,10 +302,11 @@ async def get_schedule(
     pool: Pool,
     _: ApiKey,
     date_param: DateQuery = None,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Get the schedule for a specific device (current or at a specific date)."""
     try:
-        return await schedule_service.get_schedule(pool, device_id, target_date=date_param)
+        return await schedule_service.get_schedule(pool, device_id, target_date=date_param, shift_type=shift_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener el horario: {e}")
 
@@ -306,10 +317,11 @@ async def delete_schedule(
     pool: Pool,
     _: ApiKey,
     schedule_id: Annotated[Optional[int], Query(alias="scheduleId", description="Specific schedule ID to delete")] = None,
+    shift_type: ShiftTypeQuery = "day",
 ):
     """Delete a schedule for a device (current or by specific schedule ID)."""
     try:
-        await schedule_service.delete_schedule(pool, device_id, schedule_id=schedule_id)
+        await schedule_service.delete_schedule(pool, device_id, schedule_id=schedule_id, shift_type=shift_type)
         return ScheduleDeleteResponse(
             message=f"Horario del dispositivo {device_id} eliminado correctamente"
         )
