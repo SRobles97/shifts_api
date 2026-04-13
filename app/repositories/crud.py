@@ -109,6 +109,124 @@ class ScheduleCRUD:
                 return result
 
     @staticmethod
+    async def create_with_split(pool: asyncpg.Pool, schedule_data: Dict[str, Any]) -> int:
+        """
+        Insert a bounded schedule, splitting any overlapping schedule around it.
+
+        If an existing schedule overlaps the new [valid_from, valid_to] range
+        for the same (device_id, shift_type), it is split into up to two parts:
+        a "before" portion and an "after" portion that preserves the original config.
+
+        If no overlap exists, the schedule is inserted normally.
+
+        Returns:
+            ID of the created schedule
+        """
+        device_id = schedule_data["device_id"]
+        shift_type = schedule_data.get("shift_type", "day")
+        new_from = schedule_data["valid_from"]
+        new_to = schedule_data["valid_to"]
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # Find existing schedule that overlaps the new range
+                existing = await conn.fetchrow(
+                    """
+                    SELECT id, day_schedules, extra_hours, special_days,
+                           valid_from, valid_to, version, source
+                    FROM device_schedules
+                    WHERE device_id = $1
+                      AND shift_type = $2
+                      AND valid_range && daterange($3::date, $4::date, '[]')
+                    ORDER BY valid_from
+                    LIMIT 1;
+                    """,
+                    device_id, shift_type, new_from, new_to,
+                )
+
+                if existing is not None:
+                    ex_from = existing["valid_from"]
+                    ex_to = existing["valid_to"]
+
+                    has_before = new_from > ex_from
+                    has_after = ex_to is None or new_to < ex_to
+
+                    if has_before:
+                        # Shrink existing to end the day before the override
+                        await conn.execute(
+                            """
+                            UPDATE device_schedules
+                            SET valid_to = $2::date - INTERVAL '1 day',
+                                updated_at = NOW()
+                            WHERE id = $1;
+                            """,
+                            existing["id"], new_from,
+                        )
+                    elif has_after:
+                        # Override starts on same day as existing: push existing forward
+                        await conn.execute(
+                            """
+                            UPDATE device_schedules
+                            SET valid_from = $2::date + INTERVAL '1 day',
+                                updated_at = NOW()
+                            WHERE id = $1;
+                            """,
+                            existing["id"], new_to,
+                        )
+                    else:
+                        # Override covers entire existing range: delete it
+                        await conn.execute(
+                            "DELETE FROM device_schedules WHERE id = $1;",
+                            existing["id"],
+                        )
+
+                    # Clone the "after" portion (only if we shrunk the before)
+                    if has_before and has_after:
+                        await conn.execute(
+                            """
+                            INSERT INTO device_schedules (
+                                device_id, shift_type, day_schedules, extra_hours,
+                                special_days, valid_from, valid_to, version, source,
+                                updated_at
+                            )
+                            VALUES ($1, $2, $3, $4, $5,
+                                    $6::date + INTERVAL '1 day', $7,
+                                    $8, $9, NOW());
+                            """,
+                            device_id, shift_type,
+                            existing["day_schedules"], existing["extra_hours"],
+                            existing["special_days"],
+                            new_to, ex_to,
+                            existing["version"], existing["source"],
+                        )
+
+                # Insert the override schedule
+                result = await conn.fetchval(
+                    """
+                    INSERT INTO device_schedules (
+                        device_id, shift_type, day_schedules, extra_hours,
+                        special_days, valid_from, valid_to, version, source,
+                        updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                    RETURNING id;
+                    """,
+                    device_id, shift_type,
+                    schedule_data["day_schedules"],
+                    schedule_data.get("extra_hours"),
+                    schedule_data.get("special_days"),
+                    new_from, new_to,
+                    schedule_data.get("version", "1.0"),
+                    schedule_data.get("source", "ui"),
+                )
+
+                logger.info(
+                    f"Schedule created with split for device_id={device_id} "
+                    f"shift_type={shift_type} (id={result})"
+                )
+                return result
+
+    @staticmethod
     async def get_by_id(pool: asyncpg.Pool, schedule_id: int) -> Optional[asyncpg.Record]:
         """Get a schedule by its primary key."""
         async with pool.acquire() as conn:
@@ -149,10 +267,32 @@ class ScheduleCRUD:
             )
 
     @staticmethod
+    async def get_all_current_by_device_id(
+        pool: asyncpg.Pool, device_id: int,
+    ) -> List[asyncpg.Record]:
+        """
+        Get all currently effective schedules for a device (all shift types).
+        """
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
+                       s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
+                       d.device_key AS device_name
+                FROM device_schedules s
+                LEFT JOIN devices d ON d.id = s.device_id
+                WHERE s.device_id = $1
+                  AND s.valid_range @> CURRENT_DATE
+                ORDER BY s.shift_type;
+                """,
+                device_id,
+            )
+
+    @staticmethod
     async def get_by_device_id_and_date(
         pool: asyncpg.Pool, device_id: int, target_date: date, shift_type: str = "day",
     ) -> Optional[asyncpg.Record]:
-        """Get the schedule for a device effective on a specific date."""
+        """Get the schedule for a device effective on a specific date (single shift type)."""
         async with pool.acquire() as conn:
             return await conn.fetchrow(
                 """
@@ -168,6 +308,27 @@ class ScheduleCRUD:
                 device_id,
                 target_date,
                 shift_type,
+            )
+
+    @staticmethod
+    async def get_all_by_device_id_and_date(
+        pool: asyncpg.Pool, device_id: int, target_date: date,
+    ) -> List[asyncpg.Record]:
+        """Get all schedules for a device effective on a specific date (all shift types)."""
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
+                       s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
+                       d.device_key AS device_name
+                FROM device_schedules s
+                LEFT JOIN devices d ON d.id = s.device_id
+                WHERE s.device_id = $1
+                  AND s.valid_range @> $2::date
+                ORDER BY s.shift_type;
+                """,
+                device_id,
+                target_date,
             )
 
     @staticmethod
