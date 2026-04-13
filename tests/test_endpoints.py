@@ -190,6 +190,19 @@ class TestCreateSchedule:
         resp = await client.post("/", json={"deviceId": -1, "schedule": {}, "validFrom": "2025-01-01"})
         assert resp.status_code == 422
 
+    @pytest.mark.asyncio
+    async def test_create_bounded_uses_split(self, client, mock_pool, create_payload, sample_record):
+        """POST with validTo should call create_with_split instead of create_with_auto_close."""
+        create_payload["validTo"] = "2026-04-18"
+
+        with patch(f"{CRUD_PATH}.get_device_id_by_name", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.create_with_split", new_callable=AsyncMock, return_value=1) as mock_split, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
+            resp = await client.post("/", json=create_payload)
+
+        assert resp.status_code == 200
+        mock_split.assert_called_once()
+
 
 # ==================== GET / (list all current) ====================
 
@@ -216,27 +229,44 @@ class TestGetAllSchedules:
 
 class TestGetSchedule:
     @pytest.mark.asyncio
-    async def test_found(self, client):
+    async def test_found_all_shift_types(self, client):
         rec = make_db_record(device_id=2)
-        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_all_current_by_device_id", new_callable=AsyncMock, return_value=[rec]):
             resp = await client.get("/2")
         assert resp.status_code == 200
-        assert resp.json()["deviceId"] == 2
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["deviceId"] == 2
 
     @pytest.mark.asyncio
     async def test_not_found(self, client):
-        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
+        with patch(f"{CRUD_PATH}.get_all_current_by_device_id", new_callable=AsyncMock, return_value=[]):
             resp = await client.get("/999")
         assert resp.status_code == 200
-        assert resp.json() is None
+        assert resp.json() == []
+
+    @pytest.mark.asyncio
+    async def test_with_shift_type_filter(self, client):
+        rec = make_db_record(device_id=2)
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=rec):
+            resp = await client.get("/2?shiftType=day")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["deviceId"] == 2
 
     @pytest.mark.asyncio
     async def test_with_date_query(self, client):
         rec = make_db_record(device_id=2)
-        with patch(f"{CRUD_PATH}.get_by_device_id_and_date", new_callable=AsyncMock, return_value=rec):
+        with patch(f"{CRUD_PATH}.get_all_by_device_id_and_date", new_callable=AsyncMock, return_value=[rec]):
             resp = await client.get("/2?date=2025-06-15")
         assert resp.status_code == 200
-        assert resp.json()["deviceId"] == 2
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["deviceId"] == 2
 
 
 # ==================== GET /{device_id}/history ====================

@@ -36,6 +36,7 @@ DateQuery = Annotated[Optional[date], Query(alias="date", description=DATE_QUERY
 
 SHIFT_TYPE_DESC = "Shift type: 'day' or 'night' (defaults to 'day')"
 ShiftTypeQuery = Annotated[str, Query(alias="shiftType", description=SHIFT_TYPE_DESC)]
+OptionalShiftTypeQuery = Annotated[Optional[str], Query(alias="shiftType", description="Filter by shift type: 'day' or 'night'. Omit to get all.")]
 
 # ── Reusable response docs ────────────────────────────────────────────
 
@@ -296,17 +297,17 @@ async def get_schedule_history(
         raise HTTPException(status_code=500, detail=f"Error al obtener historial: {e}")
 
 
-@router.get("/{device_id}", response_model=Optional[ScheduleRead], responses=RESPONSES_500)
+@router.get("/{device_id}", response_model=List[ScheduleRead], responses=RESPONSES_500)
 async def get_schedule(
     device_id: int,
     pool: Pool,
     _: ApiKey,
     date_param: DateQuery = None,
-    shift_type: ShiftTypeQuery = "day",
+    shift_type: OptionalShiftTypeQuery = None,
 ):
-    """Get the schedule for a specific device (current or at a specific date)."""
+    """Get schedules for a device. Returns all shift types when shiftType is omitted."""
     try:
-        return await schedule_service.get_schedule(pool, device_id, target_date=date_param, shift_type=shift_type)
+        return await schedule_service.get_device_schedules(pool, device_id, target_date=date_param, shift_type=shift_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener el horario: {e}")
 

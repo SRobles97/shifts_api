@@ -197,6 +197,37 @@ def _normalize_minute(m: int, work_start_min: int, crosses_midnight: bool) -> in
     return m
 
 
+def _parse_breaks_data(today_schedule: dict) -> list:
+    """Extract breaks from a day schedule, handling array and legacy single-object formats."""
+    if today_schedule.get("breaks"):
+        return today_schedule["breaks"]
+    if today_schedule.get("break"):
+        return [today_schedule["break"]]
+    return []
+
+
+def _deduct_breaks(
+    breaks_data: list,
+    current_norm: int,
+    work_start_minutes: int,
+    crosses_midnight: bool,
+) -> int:
+    """Calculate total break minutes to deduct from elapsed work time."""
+    deduction = 0
+    for b in breaks_data:
+        b_start = _normalize_minute(
+            _time_to_minutes(_parse_time_string(b["start"])),
+            work_start_minutes,
+            crosses_midnight,
+        )
+        b_dur = b["durationMinutes"]
+        if current_norm > b_start + b_dur:
+            deduction += b_dur
+        elif current_norm > b_start:
+            deduction += current_norm - b_start
+    return deduction
+
+
 def _calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> dict:
     """Calculate work hours usage statistics for a schedule (handles cross-midnight)."""
     current_day = current_time.strftime("%A").lower()
@@ -222,12 +253,7 @@ def _calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> di
     work_start = _parse_time_string(today_schedule["workHours"]["start"])
     work_end = _parse_time_string(today_schedule["workHours"]["end"])
 
-    # Parse breaks (new array format or legacy single-object)
-    breaks_data = []
-    if today_schedule.get("breaks"):
-        breaks_data = today_schedule["breaks"]
-    elif today_schedule.get("break"):
-        breaks_data = [today_schedule["break"]]
+    breaks_data = _parse_breaks_data(today_schedule)
 
     total_break_duration = sum(b["durationMinutes"] for b in breaks_data)
 
@@ -253,18 +279,9 @@ def _calculate_work_hours_usage(db_schedule: dict, current_time: datetime) -> di
         usage_percentage = 100.0
     else:
         work_minutes_elapsed = current_norm - work_start_minutes
-        for b in breaks_data:
-            b_start = _normalize_minute(
-                _time_to_minutes(_parse_time_string(b["start"])),
-                work_start_minutes,
-                crosses_midnight,
-            )
-            b_dur = b["durationMinutes"]
-            if current_norm > b_start + b_dur:
-                work_minutes_elapsed -= b_dur
-            elif current_norm > b_start:
-                work_minutes_elapsed -= current_norm - b_start
-
+        work_minutes_elapsed -= _deduct_breaks(
+            breaks_data, current_norm, work_start_minutes, crosses_midnight
+        )
         hours_used = max(0, work_minutes_elapsed) / 60.0
         usage_percentage = (
             (hours_used / total_work_hours * 100) if total_work_hours > 0 else 0.0
@@ -366,7 +383,10 @@ class ScheduleService:
             "source": data.metadata.source if data.metadata else "ui",
         }
 
-        schedule_id = await schedule_crud.create_with_auto_close(pool, schedule_data)
+        if schedule_data["valid_to"] is not None:
+            schedule_id = await schedule_crud.create_with_split(pool, schedule_data)
+        else:
+            schedule_id = await schedule_crud.create_with_auto_close(pool, schedule_data)
 
         db_record = await schedule_crud.get_by_id(pool, schedule_id)
         if not db_record:
@@ -386,6 +406,24 @@ class ScheduleService:
         if not db_record:
             return None
         return _build_schedule_read(db_record)
+
+    @staticmethod
+    async def get_device_schedules(
+        pool: asyncpg.Pool, device_id: int, target_date: Optional[date] = None,
+        shift_type: Optional[str] = None,
+    ) -> List[ScheduleRead]:
+        """Get schedules for a device. Returns all shift types when shift_type is None."""
+        if shift_type:
+            # Single shift type → delegate to existing method, wrap in list
+            result = await ScheduleService.get_schedule(pool, device_id, target_date, shift_type)
+            return [result] if result else []
+
+        # All shift types
+        if target_date:
+            db_records = await schedule_crud.get_all_by_device_id_and_date(pool, device_id, target_date)
+        else:
+            db_records = await schedule_crud.get_all_current_by_device_id(pool, device_id)
+        return [_build_schedule_read(r) for r in db_records]
 
     @staticmethod
     async def get_schedule_history(pool: asyncpg.Pool, device_id: int) -> List[ScheduleRead]:

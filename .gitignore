@@ -88,3 +88,4 @@ specs/
 
 docker-compose.prod.yml
 migrations/
+docs/

@@ -408,4 +408,4 @@ class TestScheduleStatsSchema:
         out = ss.model_dump(by_alias=True)
         assert out["deviceId"] == 1
         assert out["scheduleStart"] == "08:00"
-        assert out["usagePercentage"] == 31.25
+        assert out["usagePercentage"] == pytest.approx(31.25)

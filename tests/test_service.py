@@ -221,21 +221,21 @@ class TestCalculateWorkHoursUsage:
         # Monday at 06:00
         now = datetime(2025, 1, 13, 6, 0, 0)
         stats = _calculate_work_hours_usage(rec, now)
-        assert stats["hours_used"] == 0.0
-        assert stats["usage_percentage"] == 0.0
+        assert stats["hours_used"] == pytest.approx(0.0)
+        assert stats["usage_percentage"] == pytest.approx(0.0)
 
     def test_after_work(self):
         rec = make_db_record(days=["monday"])
         now = datetime(2025, 1, 13, 18, 0, 0)
         stats = _calculate_work_hours_usage(rec, now)
-        assert stats["usage_percentage"] == 100.0
+        assert stats["usage_percentage"] == pytest.approx(100.0)
 
     def test_non_work_day(self):
         rec = make_db_record(days=["monday"])
         # Sunday
         now = datetime(2025, 1, 12, 10, 0, 0)
         stats = _calculate_work_hours_usage(rec, now)
-        assert stats["total_work_hours"] == 0.0
+        assert stats["total_work_hours"] == pytest.approx(0.0)
 
 
 # ==================== ScheduleService ====================

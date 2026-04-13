@@ -79,6 +79,7 @@ def make_db_record(
     return {
         "id": id,
         "device_id": device_id,
+        "shift_type": "day",
         "day_schedules": make_day_schedules_json(days, include_break=include_break),
         "extra_hours": extra_hours,
         "special_days": special_days,

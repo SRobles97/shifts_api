@@ -13,6 +13,8 @@ Naming convention:
 
 from pydantic import BaseModel, Field, AliasChoices, field_validator
 from pydantic.config import ConfigDict
+
+SHIFT_TYPE_DESCRIPTION = "Shift type label: 'day' or 'night'"
 from typing import Any, List, Optional, Dict
 from datetime import date, datetime
 
@@ -168,7 +170,7 @@ class ScheduleCreate(BaseModel):
         default="day",
         validation_alias=AliasChoices("shiftType", "shift_type"),
         serialization_alias="shiftType",
-        description="Shift type label: 'day' or 'night'",
+        description=SHIFT_TYPE_DESCRIPTION,
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ...,
@@ -217,7 +219,7 @@ class ScheduleUpdate(BaseModel):
         None,
         validation_alias=AliasChoices("shiftType", "shift_type"),
         serialization_alias="shiftType",
-        description="Shift type label: 'day' or 'night'",
+        description=SHIFT_TYPE_DESCRIPTION,
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ..., description=_DESC_SCHEDULE_BY_DAY
@@ -258,7 +260,7 @@ class SchedulePatch(BaseModel):
         None,
         validation_alias=AliasChoices("shiftType", "shift_type"),
         serialization_alias="shiftType",
-        description="Shift type label: 'day' or 'night'",
+        description=SHIFT_TYPE_DESCRIPTION,
     )
     schedule: Optional[Dict[str, DayScheduleSchema]] = Field(
         None, description=_DESC_SCHEDULE_BY_DAY
@@ -303,7 +305,7 @@ class ScheduleRead(BaseModel):
         None, serialization_alias="deviceName", description="Device name (from devices table)"
     )
     shift_type: str = Field(
-        default="day", serialization_alias="shiftType", description="Shift type label: 'day' or 'night'"
+        default="day", serialization_alias="shiftType", description=SHIFT_TYPE_DESCRIPTION
     )
     schedule: Dict[str, DayScheduleSchema] = Field(
         ..., description=_DESC_SCHEDULE_BY_DAY

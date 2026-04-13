@@ -64,3 +64,4 @@ logs/
 *.temp
 .tmp/
 migrations/
+docs/

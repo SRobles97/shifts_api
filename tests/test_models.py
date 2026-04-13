@@ -93,7 +93,6 @@ class TestDaySchedule:
                 Break(start="15:00", duration_minutes=15),
             ],
         )
-        # 540 - 15 - 60 - 15 = 450
         assert ds.total_work_minutes() == 450
 
     def test_break_outside_work_hours(self):
@@ -176,7 +175,6 @@ class TestSpecialDay:
                 Break(start="12:00", duration_minutes=60),
             ],
         )
-        # 540 - 15 - 60 = 465
         assert sd.total_work_minutes() == 465
 
     def test_break_without_work_hours_fails(self):
