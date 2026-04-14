@@ -349,6 +349,26 @@ class ScheduleCRUD:
             )
 
     @staticmethod
+    async def get_all_in_range(
+        pool: asyncpg.Pool, range_from: date, range_to: date,
+    ) -> List[asyncpg.Record]:
+        """Get all schedules that overlap with a date range."""
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """
+                SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
+                       s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
+                       d.device_key AS device_name
+                FROM device_schedules s
+                LEFT JOIN devices d ON d.id = s.device_id
+                WHERE s.valid_range && daterange($1::date, $2::date, '[]')
+                ORDER BY s.device_id, s.shift_type, s.valid_from;
+                """,
+                range_from,
+                range_to,
+            )
+
+    @staticmethod
     async def get_all_current(pool: asyncpg.Pool) -> List[asyncpg.Record]:
         """Get all currently effective schedules (may return multiple per device if day+night)."""
         async with pool.acquire() as conn:

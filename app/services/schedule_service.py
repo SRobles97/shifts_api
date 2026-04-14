@@ -510,8 +510,15 @@ class ScheduleService:
         return _build_schedule_read(db_record)
 
     @staticmethod
-    async def get_all_schedules(pool: asyncpg.Pool) -> List[ScheduleRead]:
-        db_records = await schedule_crud.get_all_current(pool)
+    async def get_all_schedules(
+        pool: asyncpg.Pool,
+        range_from: Optional[date] = None,
+        range_to: Optional[date] = None,
+    ) -> List[ScheduleRead]:
+        if range_from and range_to:
+            db_records = await schedule_crud.get_all_in_range(pool, range_from, range_to)
+        else:
+            db_records = await schedule_crud.get_all_current(pool)
         return [_build_schedule_read(r) for r in db_records]
 
     @staticmethod

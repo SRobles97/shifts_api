@@ -276,10 +276,12 @@ async def get_effective_schedule(
 async def get_all_schedules(
     pool: Pool,
     _: ApiKey,
+    range_from: Optional[date] = Query(None, alias="from", description="Start of date range (YYYY-MM-DD)"),
+    range_to: Optional[date] = Query(None, alias="to", description="End of date range (YYYY-MM-DD)"),
 ):
-    """Get all currently effective schedules."""
+    """Get all schedules. With from/to params, returns all schedules overlapping that range. Without, returns currently effective only."""
     try:
-        return await schedule_service.get_all_schedules(pool)
+        return await schedule_service.get_all_schedules(pool, range_from, range_to)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener los horarios: {e}")
 
