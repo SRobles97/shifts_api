@@ -269,6 +269,91 @@ class TestScheduleServiceCreate:
         assert "monday" in result.schedule
 
 
+class TestDayShiftCrossMidnightValidation:
+    """A 'day' shift must not have workHours that cross midnight (end <= start).
+    That pattern is almost always a typo (e.g. 17:50 mistyped as 07:50) and the
+    intervals worker drops such days, leaving the device with no schedule.
+    Genuine overnight schedules must use shiftType='night'."""
+
+    @pytest.mark.asyncio
+    async def test_create_day_shift_cross_midnight_rejected(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "deviceId": 1,
+            "schedule": {
+                "monday": {"workHours": {"start": "08:00", "end": "07:50"}},
+            },
+            "validFrom": "2025-01-01",
+        })
+        with pytest.raises(ValueError, match="must be after start"):
+            await ScheduleService.create_schedule(pool, data)
+
+    @pytest.mark.asyncio
+    async def test_create_day_shift_equal_times_rejected(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "deviceId": 1,
+            "schedule": {
+                "monday": {"workHours": {"start": "08:00", "end": "08:00"}},
+            },
+            "validFrom": "2025-01-01",
+        })
+        with pytest.raises(ValueError, match="must be after start"):
+            await ScheduleService.create_schedule(pool, data)
+
+    @pytest.mark.asyncio
+    async def test_create_day_shift_special_day_cross_midnight_rejected(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "deviceId": 1,
+            "schedule": {
+                "monday": {"workHours": {"start": "08:00", "end": "17:00"}},
+            },
+            "specialDays": {
+                "2025-03-15": {
+                    "name": "Bad day", "type": "maintenance",
+                    "workHours": {"start": "10:00", "end": "09:00"},
+                }
+            },
+            "validFrom": "2025-01-01",
+        })
+        with pytest.raises(ValueError, match="must be after start"):
+            await ScheduleService.create_schedule(pool, data)
+
+    @pytest.mark.asyncio
+    async def test_create_night_shift_cross_midnight_allowed(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "deviceId": 1,
+            "shiftType": "night",
+            "schedule": {
+                "monday": {"workHours": {"start": "22:00", "end": "06:00"}},
+            },
+            "validFrom": "2025-01-01",
+        })
+        rec = make_db_record(device_id=1, days=["monday"])
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
+            result = await ScheduleService.create_schedule(pool, data)
+        assert result.device_id == 1
+
+    @pytest.mark.asyncio
+    async def test_create_day_shift_normal_hours_allowed(self):
+        pool = AsyncMock()
+        data = ScheduleCreate.model_validate({
+            "deviceId": 1,
+            "schedule": {
+                "monday": {"workHours": {"start": "08:00", "end": "17:50"}},
+            },
+            "validFrom": "2025-01-01",
+        })
+        rec = make_db_record(device_id=1, days=["monday"])
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1), \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=rec):
+            result = await ScheduleService.create_schedule(pool, data)
+        assert result.device_id == 1
+
+
 class TestScheduleServiceCreateByName:
     @pytest.mark.asyncio
     async def test_create_with_device_name(self):

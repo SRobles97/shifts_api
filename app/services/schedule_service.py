@@ -57,6 +57,41 @@ def _time_to_minutes(time_obj: time) -> int:
     return time_obj.hour * 60 + time_obj.minute
 
 
+def _assert_day_shift_within_day(
+    shift_type: str,
+    schedule: Optional[Dict[str, DayScheduleSchema]],
+    special_days: Optional[Dict[str, SpecialDaySchema]],
+) -> None:
+    """For a 'day' shift, workHours must not cross midnight (end must be after start).
+
+    A 'day' entry with end <= start is almost always a typo (e.g. 17:50 mistyped
+    as 07:50). The intervals worker drops such days entirely, leaving the device
+    with no schedule and an ambiguous '?' status on the dashboard. Genuine
+    overnight schedules must be created with shiftType='night'.
+
+    Raises ValueError (mapped to HTTP 400 by the router) on violation.
+    """
+    if shift_type != "day":
+        return
+
+    def _check(label: str, wh: WorkHoursSchema) -> None:
+        if _time_to_minutes(_parse_time_string(wh.end)) <= _time_to_minutes(
+            _parse_time_string(wh.start)
+        ):
+            raise ValueError(
+                f"{label}: end time '{wh.end}' must be after start time '{wh.start}' "
+                "for a 'day' shift. Use shiftType='night' for overnight schedules."
+            )
+
+    if schedule:
+        for day, cfg in schedule.items():
+            _check(f"workHours for {day}", cfg.work_hours)
+    if special_days:
+        for date_str, sd in special_days.items():
+            if sd.work_hours is not None:
+                _check(f"workHours for special day {date_str}", sd.work_hours)
+
+
 def _serialize_day_schedules(schedule_dict: Dict[str, DayScheduleSchema]) -> str:
     """Convert DayScheduleSchema dict to JSON string for DB storage."""
     result = {}
@@ -369,6 +404,7 @@ class ScheduleService:
 
     @staticmethod
     async def create_schedule(pool: asyncpg.Pool, data: ScheduleCreate) -> ScheduleRead:
+        _assert_day_shift_within_day(data.shift_type, data.schedule, data.special_days)
         device_id = await ScheduleService._resolve_device_id(pool, data)
 
         schedule_data = {
@@ -443,6 +479,9 @@ class ScheduleService:
         if not existing:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
 
+        effective_shift_type = data.shift_type if data.shift_type is not None else existing.get("shift_type", "day")
+        _assert_day_shift_within_day(effective_shift_type, data.schedule, data.special_days)
+
         schedule_id = existing["id"]
         update_data: Dict[str, Any] = {
             "day_schedules": _serialize_day_schedules(data.schedule),
@@ -475,6 +514,9 @@ class ScheduleService:
             existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not existing:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
+
+        effective_shift_type = data.shift_type if data.shift_type is not None else existing.get("shift_type", "day")
+        _assert_day_shift_within_day(effective_shift_type, data.schedule, data.special_days)
 
         schedule_id = existing["id"]
         update_data: Dict[str, Any] = {}
