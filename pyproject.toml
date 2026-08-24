@@ -2,3 +2,6 @@
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: needs a real Postgres (set SHIFTS_TEST_DSN); skipped otherwise",
+]

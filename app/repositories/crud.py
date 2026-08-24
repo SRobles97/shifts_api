@@ -14,6 +14,9 @@ import asyncpg
 import json
 from loguru import logger
 
+from ..models.notification_event import OutboxEvent
+from .notification_outbox import notification_outbox_crud
+
 
 class ScheduleCRUD:
     """CRUD operations for schedule management (N schedules per device with date ranges)."""
@@ -51,12 +54,18 @@ class ScheduleCRUD:
             return result
 
     @staticmethod
-    async def create_with_auto_close(pool: asyncpg.Pool, schedule_data: Dict[str, Any]) -> int:
+    async def create_with_auto_close(
+        pool: asyncpg.Pool,
+        schedule_data: Dict[str, Any],
+        outbox_event: Optional[OutboxEvent] = None,
+    ) -> int:
         """
         Atomically close the previous open-ended schedule and insert a new one.
 
         Sets valid_to = new_valid_from - 1 day on the previous open-ended schedule
         for the same device and shift_type, then inserts the new schedule.
+
+        Enqueues outbox_event in the same transaction when supplied.
 
         Returns:
             ID of the created schedule
@@ -102,6 +111,8 @@ class ScheduleCRUD:
                     schedule_data.get("source", "ui"),
                 )
 
+                await notification_outbox_crud.insert_if_present(conn, outbox_event)
+
                 logger.info(
                     f"Schedule created with auto-close for device_id={schedule_data['device_id']} "
                     f"shift_type={shift_type} (id={result})"
@@ -109,7 +120,11 @@ class ScheduleCRUD:
                 return result
 
     @staticmethod
-    async def create_with_split(pool: asyncpg.Pool, schedule_data: Dict[str, Any]) -> int:
+    async def create_with_split(
+        pool: asyncpg.Pool,
+        schedule_data: Dict[str, Any],
+        outbox_event: Optional[OutboxEvent] = None,
+    ) -> int:
         """
         Insert a bounded schedule, splitting any overlapping schedule around it.
 
@@ -220,6 +235,8 @@ class ScheduleCRUD:
                     schedule_data.get("source", "ui"),
                 )
 
+                await notification_outbox_crud.insert_if_present(conn, outbox_event)
+
                 logger.info(
                     f"Schedule created with split for device_id={device_id} "
                     f"shift_type={shift_type} (id={result})"
@@ -234,7 +251,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.id = $1;
@@ -255,7 +273,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
@@ -278,7 +297,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
@@ -298,7 +318,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
@@ -320,7 +341,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
@@ -339,7 +361,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.device_id = $1
@@ -358,7 +381,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.valid_range && daterange($1::date, $2::date, '[]')
@@ -376,7 +400,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.valid_range @> CURRENT_DATE
@@ -392,7 +417,8 @@ class ScheduleCRUD:
                 """
                 SELECT s.id, s.device_id, s.shift_type, s.day_schedules, s.extra_hours, s.special_days,
                        s.valid_from, s.valid_to, s.created_at, s.updated_at, s.version, s.source,
-                       d.device_key AS device_name
+                       d.device_key AS device_name,
+                       d.display_name AS device_display_name, d.company_id
                 FROM device_schedules s
                 LEFT JOIN devices d ON d.id = s.device_id
                 WHERE s.day_schedules ? $1
@@ -407,76 +433,100 @@ class ScheduleCRUD:
         pool: asyncpg.Pool,
         schedule_id: int,
         update_data: Dict[str, Any],
+        outbox_event: Optional[OutboxEvent] = None,
     ) -> bool:
         """
         Partially update a schedule by its primary key.
+
+        Enqueues outbox_event in the same transaction when supplied.
 
         Returns:
             True if schedule was updated, False if not found
         """
         async with pool.acquire() as conn:
-            existing = await conn.fetchrow(
-                "SELECT id FROM device_schedules WHERE id = $1",
-                schedule_id,
-            )
-            if not existing:
-                return False
+            async with conn.transaction():
+                existing = await conn.fetchrow(
+                    "SELECT id FROM device_schedules WHERE id = $1",
+                    schedule_id,
+                )
+                if not existing:
+                    return False
 
-            update_fields = []
-            values = []
-            param_idx = 2  # $1 is schedule_id
+                update_fields = []
+                values = []
+                param_idx = 2  # $1 is schedule_id
 
-            for field, value in update_data.items():
-                update_fields.append(f"{field} = ${param_idx}")
-                values.append(value)
-                param_idx += 1
+                for field, value in update_data.items():
+                    update_fields.append(f"{field} = ${param_idx}")
+                    values.append(value)
+                    param_idx += 1
 
-            if not update_fields:
+                if not update_fields:
+                    return True
+
+                update_fields.append("updated_at = NOW()")
+
+                query = f"""
+                    UPDATE device_schedules
+                    SET {', '.join(update_fields)}
+                    WHERE id = $1
+                """
+
+                await conn.execute(query, schedule_id, *values)
+                await notification_outbox_crud.insert_if_present(conn, outbox_event)
+                logger.info(f"Schedule id={schedule_id} partially updated")
                 return True
-
-            update_fields.append("updated_at = NOW()")
-
-            query = f"""
-                UPDATE device_schedules
-                SET {', '.join(update_fields)}
-                WHERE id = $1
-            """
-
-            await conn.execute(query, schedule_id, *values)
-            logger.info(f"Schedule id={schedule_id} partially updated")
-            return True
 
     @staticmethod
     async def delete_current_by_device_id(
-        pool: asyncpg.Pool, device_id: int, shift_type: str = "day",
+        pool: asyncpg.Pool,
+        device_id: int,
+        shift_type: str = "day",
+        outbox_event: Optional[OutboxEvent] = None,
     ) -> bool:
-        """Delete the currently effective schedule for a device and shift_type."""
+        """Delete the currently effective schedule for a device and shift_type.
+
+        Enqueues outbox_event in the same transaction, only if a row was deleted.
+        """
         async with pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                DELETE FROM device_schedules
-                WHERE device_id = $1
-                  AND shift_type = $2
-                  AND valid_range @> CURRENT_DATE;
-                """,
-                device_id,
-                shift_type,
-            )
-            deleted_count = int(result.split()[-1])
-            logger.info(f"Current schedule for device_id={device_id} shift_type={shift_type} deleted: {deleted_count > 0}")
-            return deleted_count > 0
+            async with conn.transaction():
+                result = await conn.execute(
+                    """
+                    DELETE FROM device_schedules
+                    WHERE device_id = $1
+                      AND shift_type = $2
+                      AND valid_range @> CURRENT_DATE;
+                    """,
+                    device_id,
+                    shift_type,
+                )
+                deleted_count = int(result.split()[-1])
+                if deleted_count > 0:
+                    await notification_outbox_crud.insert_if_present(conn, outbox_event)
+                logger.info(f"Current schedule for device_id={device_id} shift_type={shift_type} deleted: {deleted_count > 0}")
+                return deleted_count > 0
 
     @staticmethod
-    async def delete_by_id(pool: asyncpg.Pool, schedule_id: int) -> bool:
-        """Delete a specific schedule by its primary key."""
+    async def delete_by_id(
+        pool: asyncpg.Pool,
+        schedule_id: int,
+        outbox_event: Optional[OutboxEvent] = None,
+    ) -> bool:
+        """Delete a specific schedule by its primary key.
+
+        Enqueues outbox_event in the same transaction, only if a row was deleted.
+        """
         async with pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM device_schedules WHERE id = $1",
-                schedule_id,
-            )
-            deleted_count = int(result.split()[-1])
-            logger.info(f"Schedule id={schedule_id} deleted: {deleted_count > 0}")
-            return deleted_count > 0
+            async with conn.transaction():
+                result = await conn.execute(
+                    "DELETE FROM device_schedules WHERE id = $1",
+                    schedule_id,
+                )
+                deleted_count = int(result.split()[-1])
+                if deleted_count > 0:
+                    await notification_outbox_crud.insert_if_present(conn, outbox_event)
+                logger.info(f"Schedule id={schedule_id} deleted: {deleted_count > 0}")
+                return deleted_count > 0
 
     @staticmethod
     async def get_special_days(

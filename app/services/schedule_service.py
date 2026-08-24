@@ -8,11 +8,13 @@ The router maps these to HTTP status codes.
 
 import json
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
+from loguru import logger
 
+from ..models.notification_event import ShiftChangeContext
 from ..models.schedule import (
     Break,
     DaySchedule,
@@ -23,6 +25,12 @@ from ..models.schedule import (
     WorkHours,
 )
 from ..repositories.crud import schedule_crud
+from ..repositories.devices import device_crud
+from .notification_events import (
+    build_shift_change_event,
+    snapshot_from_record,
+    snapshot_from_request,
+)
 from ..schemas.schedule import (
     AllScheduleStatsResponse,
     BreakSchema,
@@ -383,6 +391,37 @@ def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
     )
 
 
+async def _shift_change_event(
+    pool: asyncpg.Pool,
+    context: Dict[str, Any],
+):
+    """Build the outbox event for a schedule change, or None to send nothing.
+
+    Returns None when the device cannot be resolved. `device_schedules.device_id`
+    is a FK onto `devices`, so that should be unreachable; if it ever happens we
+    would rather drop the notification than fail the schedule write, and the
+    warning says so out loud.
+    """
+    device = await device_crud.get_device_ref(pool, context["device_id"])
+    if device is None:
+        logger.warning(
+            f"No device row for device_id={context['device_id']}; "
+            "skipping shift-change notification"
+        )
+        return None
+
+    return build_shift_change_event(
+        ShiftChangeContext(
+            action=context["action"],
+            device=device,
+            shift_type=context["shift_type"],
+            changed_at=datetime.now(timezone.utc),
+            before=context.get("before"),
+            after=context.get("after"),
+        )
+    )
+
+
 class ScheduleService:
     """Service layer encapsulating schedule business logic."""
 
@@ -419,10 +458,22 @@ class ScheduleService:
             "source": data.metadata.source if data.metadata else "ui",
         }
 
+        # A create auto-closes the previous open-ended schedule, so it moves the
+        # device's effective hours just as an edit does — hence a notification.
+        event = await _shift_change_event(
+            pool,
+            {
+                "action": "created",
+                "device_id": device_id,
+                "shift_type": data.shift_type,
+                "after": snapshot_from_request(data),
+            },
+        )
+
         if schedule_data["valid_to"] is not None:
-            schedule_id = await schedule_crud.create_with_split(pool, schedule_data)
+            schedule_id = await schedule_crud.create_with_split(pool, schedule_data, event)
         else:
-            schedule_id = await schedule_crud.create_with_auto_close(pool, schedule_data)
+            schedule_id = await schedule_crud.create_with_auto_close(pool, schedule_data, event)
 
         db_record = await schedule_crud.get_by_id(pool, schedule_id)
         if not db_record:
@@ -498,7 +549,19 @@ class ScheduleService:
         if data.valid_to is not None:
             update_data["valid_to"] = data.valid_to
 
-        await schedule_crud.partial_update(pool, schedule_id, update_data)
+        before = snapshot_from_record(existing)
+        event = await _shift_change_event(
+            pool,
+            {
+                "action": "updated",
+                "device_id": device_id,
+                "shift_type": effective_shift_type,
+                "before": before,
+                "after": snapshot_from_request(data, before),
+            },
+        )
+
+        await schedule_crud.partial_update(pool, schedule_id, update_data, event)
 
         db_record = await schedule_crud.get_by_id(pool, schedule_id)
         return _build_schedule_read(db_record)
@@ -546,7 +609,18 @@ class ScheduleService:
                 update_data["source"] = data.metadata.source
 
         if update_data:
-            await schedule_crud.partial_update(pool, schedule_id, update_data)
+            before = snapshot_from_record(existing)
+            event = await _shift_change_event(
+                pool,
+                {
+                    "action": "patched",
+                    "device_id": device_id,
+                    "shift_type": effective_shift_type,
+                    "before": before,
+                    "after": snapshot_from_request(data, before, merge=True),
+                },
+            )
+            await schedule_crud.partial_update(pool, schedule_id, update_data, event)
 
         db_record = await schedule_crud.get_by_id(pool, schedule_id)
         return _build_schedule_read(db_record)
@@ -576,10 +650,31 @@ class ScheduleService:
         pool: asyncpg.Pool, device_id: int, schedule_id: Optional[int] = None,
         shift_type: str = "day",
     ) -> bool:
+        # Read before deleting: once the row is gone there is nothing left to
+        # describe, and the email should say which hours disappeared.
         if schedule_id:
-            deleted = await schedule_crud.delete_by_id(pool, schedule_id)
+            existing = await schedule_crud.get_by_id(pool, schedule_id)
         else:
-            deleted = await schedule_crud.delete_current_by_device_id(pool, device_id, shift_type)
+            existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
+        if not existing:
+            raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
+
+        event = await _shift_change_event(
+            pool,
+            {
+                "action": "deleted",
+                "device_id": existing["device_id"],
+                "shift_type": existing.get("shift_type", shift_type),
+                "before": snapshot_from_record(existing),
+            },
+        )
+
+        if schedule_id:
+            deleted = await schedule_crud.delete_by_id(pool, schedule_id, event)
+        else:
+            deleted = await schedule_crud.delete_current_by_device_id(
+                pool, device_id, shift_type, event
+            )
         if not deleted:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
         return True

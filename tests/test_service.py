@@ -543,21 +543,32 @@ class TestScheduleServiceDelete:
     @pytest.mark.asyncio
     async def test_delete_not_found(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=False):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             with pytest.raises(LookupError):
                 await ScheduleService.delete_schedule(pool, 999)
 
     @pytest.mark.asyncio
+    async def test_delete_reports_not_found_when_the_row_vanishes_mid_flight(self):
+        """Pre-read succeeded but the DELETE removed nothing (concurrent delete)."""
+        pool = AsyncMock()
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=make_db_record()), \
+             patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=False):
+            with pytest.raises(LookupError):
+                await ScheduleService.delete_schedule(pool, 1)
+
+    @pytest.mark.asyncio
     async def test_delete_success(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=make_db_record()), \
+             patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True):
             result = await ScheduleService.delete_schedule(pool, 1)
         assert result is True
 
     @pytest.mark.asyncio
     async def test_delete_by_schedule_id(self):
         pool = AsyncMock()
-        with patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True):
+        with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=make_db_record()), \
+             patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True):
             result = await ScheduleService.delete_schedule(pool, 1, schedule_id=42)
         assert result is True
 
