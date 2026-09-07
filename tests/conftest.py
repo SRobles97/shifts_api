@@ -8,13 +8,14 @@ and sample data factories for consistent test data.
 import json
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.core.dependencies import get_db_pool, verify_api_key
 from app.main import app
+from app.models.notification_event import DeviceRef
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,8 @@ def make_db_record(
         "version": version,
         "source": source,
         "device_name": device_name,
+        "device_display_name": "Fresadora 1",
+        "company_id": 3,
     }
 
 
@@ -131,6 +134,28 @@ def sample_record_with_special_days():
             }
         ),
     )
+
+
+SAMPLE_DEVICE_REF = DeviceRef(
+    id=1, company_id=3, key="1103", display_name="Fresadora 1"
+)
+
+
+@pytest.fixture(autouse=True)
+def stub_device_ref():
+    """Stand in for the `devices` lookup the outbox event needs.
+
+    Every test here mocks the pool wholesale, so the real query has no rows to
+    read. Tests that care about the notification itself assert on the event
+    passed to the CRUD layer; this fixture only keeps the lookup from being the
+    thing under test everywhere else. Override it by patching the same target.
+    """
+    with patch(
+        "app.services.schedule_service.device_crud.get_device_ref",
+        new_callable=AsyncMock,
+        return_value=SAMPLE_DEVICE_REF,
+    ) as stub:
+        yield stub
 
 
 @pytest.fixture

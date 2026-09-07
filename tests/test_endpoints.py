@@ -360,21 +360,23 @@ class TestPatchSchedule:
 
 class TestDeleteSchedule:
     @pytest.mark.asyncio
-    async def test_delete_success(self, client):
-        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True):
+    async def test_delete_success(self, client, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True):
             resp = await client.delete("/1")
         assert resp.status_code == 200
         assert "message" in resp.json()
 
     @pytest.mark.asyncio
     async def test_delete_not_found(self, client):
-        with patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=False):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
             resp = await client.delete("/999")
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_by_schedule_id(self, client):
-        with patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True):
+    async def test_delete_by_schedule_id(self, client, sample_record):
+        with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True):
             resp = await client.delete("/1?scheduleId=42")
         assert resp.status_code == 200
 
