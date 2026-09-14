@@ -30,7 +30,8 @@ import asyncpg
 import pytest
 
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
-from app.services.schedule_service import ScheduleService
+from app.repositories.crud import schedule_crud
+from app.services.schedule_service import MirroredScheduleError, ScheduleService
 
 DSN = os.getenv("SHIFTS_TEST_DSN")
 
@@ -46,6 +47,12 @@ OUTBOX_INSERT = "app.repositories.notification_outbox.NotificationOutboxCRUD.ins
 @pytest.fixture(autouse=True)
 def stub_device_ref():
     """Override conftest's stub — here the real `devices` lookup is the point."""
+    yield None
+
+
+@pytest.fixture(autouse=True)
+def stub_mirror_check():
+    """Override conftest's stub — the real mirror query runs against the DB."""
     yield None
 
 
@@ -179,6 +186,50 @@ class TestDeviceLookup:
             "F1",
             "Fresadora 1",
         )
+
+
+class TestPilotMirror:
+    async def _insert_row(self, pool, device_id, source):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO device_schedules (device_id, day_schedules, valid_from, source)
+                VALUES ($1, '{"monday": {"workHours": {"start": "08:00", "end": "17:00"}}}',
+                        CURRENT_DATE, $2);
+                """,
+                device_id,
+                source,
+            )
+
+    async def test_device_without_schedules_is_not_mirrored(self, pool, clean):
+        assert await schedule_crud.is_mirrored_device(pool, clean["device_id"]) is False
+
+    async def test_ui_schedule_is_not_mirrored(self, pool, clean):
+        await self._insert_row(pool, clean["device_id"], "ui")
+        assert await schedule_crud.is_mirrored_device(pool, clean["device_id"]) is False
+
+    async def test_engine_copied_schedule_is_mirrored(self, pool, clean):
+        await self._insert_row(pool, clean["device_id"], "pilot_mirror")
+        assert await schedule_crud.is_mirrored_device(pool, clean["device_id"]) is True
+
+    async def test_edit_is_refused_and_nothing_is_written(self, pool, clean):
+        await self._insert_row(pool, clean["device_id"], "pilot_mirror")
+        before = await counts(pool, clean)
+
+        data = ScheduleUpdate.model_validate(
+            {"schedule": {"monday": {"workHours": {"start": "10:00", "end": "17:00"}}}}
+        )
+        with pytest.raises(MirroredScheduleError):
+            await ScheduleService.update_schedule(pool, clean["device_id"], data)
+
+        assert await counts(pool, clean) == before
+        async with pool.acquire() as conn:
+            start = await conn.fetchval(
+                "SELECT day_schedules->'monday'->'workHours'->>'start' "
+                "FROM device_schedules WHERE device_id = $1;",
+                clean["device_id"],
+            )
+        assert start == "08:00"
 
 
 class TestAtomicity:

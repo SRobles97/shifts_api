@@ -391,6 +391,27 @@ def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
     )
 
 
+class MirroredScheduleError(Exception):
+    """The device is a pilot whose schedule status-engine copies from its source.
+
+    Mapped to 409 by the router. Any write would be overwritten on the engine's
+    next run (every ~5 minutes) — after the notification email had already gone
+    out claiming the change was made.
+    """
+
+
+_MIRRORED_MESSAGE = (
+    "Este equipo es un piloto: su horario se copia automáticamente desde el "
+    "equipo original y cualquier cambio aquí se perdería. Edita el horario del "
+    "equipo original."
+)
+
+
+async def _assert_not_mirrored(pool: asyncpg.Pool, device_id: int) -> None:
+    if await schedule_crud.is_mirrored_device(pool, device_id):
+        raise MirroredScheduleError(_MIRRORED_MESSAGE)
+
+
 async def _shift_change_event(
     pool: asyncpg.Pool,
     context: Dict[str, Any],
@@ -445,6 +466,7 @@ class ScheduleService:
     async def create_schedule(pool: asyncpg.Pool, data: ScheduleCreate) -> ScheduleRead:
         _assert_day_shift_within_day(data.shift_type, data.schedule, data.special_days)
         device_id = await ScheduleService._resolve_device_id(pool, data)
+        await _assert_not_mirrored(pool, device_id)
 
         schedule_data = {
             "device_id": device_id,
@@ -529,6 +551,7 @@ class ScheduleService:
             existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not existing:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
+        await _assert_not_mirrored(pool, existing["device_id"])
 
         effective_shift_type = data.shift_type if data.shift_type is not None else existing.get("shift_type", "day")
         _assert_day_shift_within_day(effective_shift_type, data.schedule, data.special_days)
@@ -577,6 +600,7 @@ class ScheduleService:
             existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not existing:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
+        await _assert_not_mirrored(pool, existing["device_id"])
 
         effective_shift_type = data.shift_type if data.shift_type is not None else existing.get("shift_type", "day")
         _assert_day_shift_within_day(effective_shift_type, data.schedule, data.special_days)
@@ -658,6 +682,8 @@ class ScheduleService:
             existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not existing:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
+        # The row's own device, not the path's: `scheduleId` can name any row.
+        await _assert_not_mirrored(pool, existing["device_id"])
 
         event = await _shift_change_event(
             pool,
@@ -734,6 +760,7 @@ class ScheduleService:
         db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
+        await _assert_not_mirrored(pool, device_id)
 
         schedule_id = db_record["id"]
 
@@ -763,6 +790,7 @@ class ScheduleService:
         db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:
             raise LookupError(f"Schedule for device_id={device_id} not found")
+        await _assert_not_mirrored(pool, device_id)
 
         schedule_id = db_record["id"]
 

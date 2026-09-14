@@ -22,7 +22,7 @@ from ..schemas.schedule import (
     SingleScheduleStatsResponse,
     SpecialDaySchema,
 )
-from ..services.schedule_service import schedule_service
+from ..services.schedule_service import MirroredScheduleError, schedule_service
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -107,6 +107,8 @@ async def create_schedule(
     """Create a schedule for a device (auto-closes previous open-ended schedule)."""
     try:
         return await schedule_service.create_schedule(pool, data)
+    except MirroredScheduleError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -127,6 +129,8 @@ async def update_schedule(
     """Full replacement of a schedule for a device."""
     try:
         return await schedule_service.update_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type)
+    except MirroredScheduleError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -147,6 +151,8 @@ async def patch_schedule(
     """Partial update of a schedule for a device."""
     try:
         return await schedule_service.patch_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type)
+    except MirroredScheduleError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -226,6 +232,8 @@ async def add_special_day(
     """Add or update a single special day for a device."""
     try:
         return await schedule_service.add_special_day(pool, device_id, date, special_day, shift_type=shift_type)
+    except MirroredScheduleError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -245,6 +253,8 @@ async def delete_special_day(
     """Delete a specific special day for a device."""
     try:
         return await schedule_service.delete_special_day(pool, device_id, date, shift_type=shift_type)
+    except MirroredScheduleError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -328,6 +338,8 @@ async def delete_schedule(
         return ScheduleDeleteResponse(
             message=f"Horario del dispositivo {device_id} eliminado correctamente"
         )
+    except MirroredScheduleError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

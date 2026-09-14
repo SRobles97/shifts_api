@@ -5,7 +5,7 @@ Uses httpx AsyncClient with dependency overrides so no real DB is needed.
 The service layer's CRUD calls are patched to return synthetic data.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -523,6 +523,127 @@ class TestEffectiveSchedule:
     async def test_invalid_date(self, client):
         resp = await client.get("/effective-schedule/1/bad-date")
         assert resp.status_code == 400
+
+
+# ==================== Pilot mirrors are read-only ====================
+
+
+@pytest.fixture
+def mirrored(stub_mirror_check):
+    """Make the device under test a pilot whose schedule the engine mirrors."""
+    stub_mirror_check.return_value = True
+    return stub_mirror_check
+
+
+class TestMirroredScheduleIsReadOnly:
+    """status-engine rewrites a pilot's schedule from its source every run, so
+    an edit here would be sent as an email and then silently reverted. Refuse it
+    before anything is written or enqueued."""
+
+    @staticmethod
+    def assert_refused(resp):
+        assert resp.status_code == 409
+        assert "piloto" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_create_refused(self, client, mirrored):
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock) as write, \
+             patch(f"{CRUD_PATH}.create_with_split", new_callable=AsyncMock) as split:
+            resp = await client.post(
+                "/",
+                json={
+                    "deviceId": 1,
+                    "schedule": {"monday": {"workHours": {"start": "08:00", "end": "17:00"}}},
+                    "validFrom": "2025-01-01",
+                },
+            )
+        self.assert_refused(resp)
+        write.assert_not_called()
+        split.assert_not_called()
+        mirrored.assert_awaited_with(ANY, 1)
+
+    @pytest.mark.asyncio
+    async def test_update_refused(self, client, mirrored, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write:
+            resp = await client.put(
+                "/1",
+                json={"schedule": {"monday": {"workHours": {"start": "09:00", "end": "18:00"}}}},
+            )
+        self.assert_refused(resp)
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_patch_refused(self, client, mirrored, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write:
+            resp = await client.patch("/1", json={"metadata": {"version": "2.0"}})
+        self.assert_refused(resp)
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_refused(self, client, mirrored, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock) as write:
+            resp = await client.delete("/1")
+        self.assert_refused(resp)
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_by_schedule_id_checks_the_rows_own_device(self, client, mirrored):
+        # The path says device 1, but scheduleId points at device 77's row: the
+        # guard must judge the row being deleted, not the URL.
+        row = make_db_record(id=42, device_id=77)
+        with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=row), \
+             patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock) as write:
+            resp = await client.delete("/1?scheduleId=42")
+        self.assert_refused(resp)
+        write.assert_not_called()
+        mirrored.assert_awaited_with(ANY, 77)
+
+    @pytest.mark.asyncio
+    async def test_add_special_day_refused(self, client, mirrored, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write:
+            resp = await client.post(
+                "/special-days/1?date=2025-12-25",
+                json={"name": "Navidad", "type": "holiday"},
+            )
+        self.assert_refused(resp)
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_special_day_refused(self, client, mirrored):
+        rec = make_db_record(
+            device_id=1,
+            special_days=make_special_days_json({
+                "2025-12-25": {
+                    "name": "Navidad", "type": "holiday",
+                    "workHours": None, "breaks": None,
+                    "isRecurring": False, "recurrencePattern": None,
+                }
+            }),
+        )
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=rec), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write:
+            resp = await client.delete("/special-days/1/2025-12-25")
+        self.assert_refused(resp)
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reads_still_work(self, client, mirrored, sample_record):
+        with patch(f"{CRUD_PATH}.get_all_current_by_device_id", new_callable=AsyncMock, return_value=[sample_record]):
+            resp = await client.get("/1")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_missing_schedule_is_still_404(self, client, mirrored):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=None):
+            resp = await client.put(
+                "/999",
+                json={"schedule": {"monday": {"workHours": {"start": "09:00", "end": "18:00"}}}},
+            )
+        assert resp.status_code == 404
 
 
 # ==================== Auth ====================

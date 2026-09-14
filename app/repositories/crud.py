@@ -589,5 +589,25 @@ class ScheduleCRUD:
 
             return None
 
+    @staticmethod
+    async def is_mirrored_device(pool: asyncpg.Pool, device_id: int) -> bool:
+        """Whether status-engine owns this device's schedule as a pilot mirror.
+
+        The engine replaces a pilot's whole schedule with its source device's on
+        every run and tags the copies `source = 'pilot_mirror'` — that tag is the
+        only trace of the pilot→source link outside the engine's algorithm files.
+        A pilot whose source has no schedule has no rows, so it reads as False.
+        """
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM device_schedules
+                    WHERE device_id = $1 AND source = 'pilot_mirror'
+                );
+                """,
+                device_id,
+            )
+
 
 schedule_crud = ScheduleCRUD()

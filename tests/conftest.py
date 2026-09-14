@@ -158,6 +158,21 @@ def stub_device_ref():
         yield stub
 
 
+@pytest.fixture(autouse=True)
+def stub_mirror_check():
+    """Treat every device as an ordinary, editable one.
+
+    Same reason as `stub_device_ref`: the pool is mocked, so the real query
+    cannot answer. Tests about pilot mirrors patch the same target to True.
+    """
+    with patch(
+        "app.services.schedule_service.schedule_crud.is_mirrored_device",
+        new_callable=AsyncMock,
+        return_value=False,
+    ) as stub:
+        yield stub
+
+
 @pytest.fixture
 def mock_pool():
     """An AsyncMock standing in for asyncpg.Pool."""
