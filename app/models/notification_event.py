@@ -51,6 +51,13 @@ class DeviceRef(BaseModel):
         return self.display_name or self.key or f"#{self.id}"
 
 
+class Actor(BaseModel):
+    """The person who made a change, as verified by auth_api's /auth/me."""
+
+    email: str
+    name: str = Field(default="", description="users.full_name, empty when unset")
+
+
 class ScheduleSnapshot(BaseModel):
     """One side of a schedule change — the state before or after."""
 
@@ -75,6 +82,7 @@ class ShiftChangeContext(BaseModel):
     changed_at: datetime
     before: Optional[ScheduleSnapshot] = None
     after: Optional[ScheduleSnapshot] = None
+    actor: Optional[Actor] = None
 
 
 class OutboxEvent(BaseModel):

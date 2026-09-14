@@ -10,7 +10,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 
+from ..core.actor import get_actor
 from ..core.dependencies import get_db_pool, verify_api_key
+from ..models.notification_event import Actor
 from ..schemas.schedule import (
     AllScheduleStatsResponse,
     DayScheduleSchema,
@@ -30,6 +32,9 @@ router = APIRouter(prefix="/schedules", tags=["schedules"])
 
 Pool = Annotated[asyncpg.Pool, Depends(get_db_pool)]
 ApiKey = Annotated[None, Depends(verify_api_key)]
+# Who made the change, for the notification only. Resolves to None rather than
+# ever failing the request — see app/core/actor.py.
+ChangeActor = Annotated[Optional[Actor], Depends(get_actor)]
 
 DATE_QUERY_DESC = "Target date (YYYY-MM-DD) to resolve schedule"
 DateQuery = Annotated[Optional[date], Query(alias="date", description=DATE_QUERY_DESC)]
@@ -103,10 +108,11 @@ async def create_schedule(
     data: ScheduleCreate,
     pool: Pool,
     _: ApiKey,
+    actor: ChangeActor,
 ):
     """Create a schedule for a device (auto-closes previous open-ended schedule)."""
     try:
-        return await schedule_service.create_schedule(pool, data)
+        return await schedule_service.create_schedule(pool, data, actor=actor)
     except MirroredScheduleError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
@@ -123,12 +129,13 @@ async def update_schedule(
     data: ScheduleUpdate,
     pool: Pool,
     _: ApiKey,
+    actor: ChangeActor,
     date_param: DateQuery = None,
     shift_type: ShiftTypeQuery = "day",
 ):
     """Full replacement of a schedule for a device."""
     try:
-        return await schedule_service.update_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type)
+        return await schedule_service.update_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type, actor=actor)
     except MirroredScheduleError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
@@ -145,12 +152,13 @@ async def patch_schedule(
     data: SchedulePatch,
     pool: Pool,
     _: ApiKey,
+    actor: ChangeActor,
     date_param: DateQuery = None,
     shift_type: ShiftTypeQuery = "day",
 ):
     """Partial update of a schedule for a device."""
     try:
-        return await schedule_service.patch_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type)
+        return await schedule_service.patch_schedule(pool, device_id, data, target_date=date_param, shift_type=shift_type, actor=actor)
     except MirroredScheduleError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
@@ -329,12 +337,13 @@ async def delete_schedule(
     device_id: int,
     pool: Pool,
     _: ApiKey,
+    actor: ChangeActor,
     schedule_id: Annotated[Optional[int], Query(alias="scheduleId", description="Specific schedule ID to delete")] = None,
     shift_type: ShiftTypeQuery = "day",
 ):
     """Delete a schedule for a device (current or by specific schedule ID)."""
     try:
-        await schedule_service.delete_schedule(pool, device_id, schedule_id=schedule_id, shift_type=shift_type)
+        await schedule_service.delete_schedule(pool, device_id, schedule_id=schedule_id, shift_type=shift_type, actor=actor)
         return ScheduleDeleteResponse(
             message=f"Horario del dispositivo {device_id} eliminado correctamente"
         )

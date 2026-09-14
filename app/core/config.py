@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     ENABLE_JSON_LOGS: str = "false"
     ENVIRONMENT: str = "development"
+    # auth_api base URL (…/auth-api). Only used to name who made a schedule
+    # change in the notification email; unset means "No identificado", never
+    # a failed save.
+    AUTH_API_URL: str = ""
+    AUTH_ME_TIMEOUT_SECONDS: float = 3.0
 
     class Config:
         env_file = ".env"

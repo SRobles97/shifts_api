@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import asyncpg
 from loguru import logger
 
-from ..models.notification_event import ShiftChangeContext
+from ..models.notification_event import Actor, ShiftChangeContext
 from ..models.schedule import (
     Break,
     DaySchedule,
@@ -439,6 +439,7 @@ async def _shift_change_event(
             changed_at=datetime.now(timezone.utc),
             before=context.get("before"),
             after=context.get("after"),
+            actor=context.get("actor"),
         )
     )
 
@@ -463,7 +464,9 @@ class ScheduleService:
         raise ValueError("Either deviceId or deviceName must be provided")
 
     @staticmethod
-    async def create_schedule(pool: asyncpg.Pool, data: ScheduleCreate) -> ScheduleRead:
+    async def create_schedule(
+        pool: asyncpg.Pool, data: ScheduleCreate, actor: Optional[Actor] = None,
+    ) -> ScheduleRead:
         _assert_day_shift_within_day(data.shift_type, data.schedule, data.special_days)
         device_id = await ScheduleService._resolve_device_id(pool, data)
         await _assert_not_mirrored(pool, device_id)
@@ -489,6 +492,7 @@ class ScheduleService:
                 "device_id": device_id,
                 "shift_type": data.shift_type,
                 "after": snapshot_from_request(data),
+                "actor": actor,
             },
         )
 
@@ -544,6 +548,7 @@ class ScheduleService:
     async def update_schedule(
         pool: asyncpg.Pool, device_id: int, data: ScheduleUpdate,
         target_date: Optional[date] = None, shift_type: str = "day",
+        actor: Optional[Actor] = None,
     ) -> ScheduleRead:
         if target_date:
             existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date, shift_type)
@@ -581,6 +586,7 @@ class ScheduleService:
                 "shift_type": effective_shift_type,
                 "before": before,
                 "after": snapshot_from_request(data, before),
+                "actor": actor,
             },
         )
 
@@ -593,6 +599,7 @@ class ScheduleService:
     async def patch_schedule(
         pool: asyncpg.Pool, device_id: int, data: SchedulePatch,
         target_date: Optional[date] = None, shift_type: str = "day",
+        actor: Optional[Actor] = None,
     ) -> ScheduleRead:
         if target_date:
             existing = await schedule_crud.get_by_device_id_and_date(pool, device_id, target_date, shift_type)
@@ -642,6 +649,7 @@ class ScheduleService:
                     "shift_type": effective_shift_type,
                     "before": before,
                     "after": snapshot_from_request(data, before, merge=True),
+                    "actor": actor,
                 },
             )
             await schedule_crud.partial_update(pool, schedule_id, update_data, event)
@@ -672,7 +680,7 @@ class ScheduleService:
     @staticmethod
     async def delete_schedule(
         pool: asyncpg.Pool, device_id: int, schedule_id: Optional[int] = None,
-        shift_type: str = "day",
+        shift_type: str = "day", actor: Optional[Actor] = None,
     ) -> bool:
         # Read before deleting: once the row is gone there is nothing left to
         # describe, and the email should say which hours disappeared.
@@ -692,6 +700,7 @@ class ScheduleService:
                 "device_id": existing["device_id"],
                 "shift_type": existing.get("shift_type", shift_type),
                 "before": snapshot_from_record(existing),
+                "actor": actor,
             },
         )
 

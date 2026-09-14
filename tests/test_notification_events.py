@@ -11,6 +11,7 @@ import pytest
 
 from app.models.notification_event import (
     NOTIFICATION_TYPE_SHIFT_CHANGE,
+    Actor,
     BreakRef,
     DayHours,
     DeviceRef,
@@ -46,6 +47,7 @@ def context(action: str, before=None, after=None, **kwargs) -> ShiftChangeContex
         changed_at=kwargs.pop("changed_at", CHANGED_AT),
         before=before,
         after=after,
+        actor=kwargs.pop("actor", None),
     )
 
 
@@ -115,6 +117,36 @@ class TestEnvelope:
         assert payload["valid_from"] == "2026-09-01"
         assert payload["valid_to"] is None
         assert payload["changed_at"] == "2026-08-24T14:05:11.123456+00:00"
+
+
+# ==================== Actor ====================
+
+
+class TestActor:
+    def test_payload_names_who_made_the_change(self):
+        event = build_shift_change_event(
+            context(
+                "created",
+                after=snapshot({"monday": day("08:00", "17:00")}),
+                actor=Actor(email="ana@planta.cl", name="Ana Pérez"),
+            )
+        )
+        assert event.payload["actor"] == {"email": "ana@planta.cl", "name": "Ana Pérez"}
+
+    def test_unknown_actor_is_an_explicit_null(self):
+        event = build_shift_change_event(
+            context("created", after=snapshot({"monday": day("08:00", "17:00")}))
+        )
+        assert "actor" in event.payload
+        assert event.payload["actor"] is None
+
+    def test_actor_is_not_part_of_the_event_identity(self):
+        after = snapshot({"monday": day("08:00", "17:00")})
+        anonymous = build_shift_change_event(context("created", after=after))
+        known = build_shift_change_event(
+            context("created", after=after, actor=Actor(email="ana@planta.cl"))
+        )
+        assert known.dedupe_key == anonymous.dedupe_key
 
 
 # ==================== Day-level diff ====================

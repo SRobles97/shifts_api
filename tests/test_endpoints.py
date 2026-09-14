@@ -7,10 +7,14 @@ The service layer's CRUD calls are patched to return synthetic data.
 
 from unittest.mock import ANY, AsyncMock, patch
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.core import actor as actor_module
+from app.core.actor import get_actor
 from app.core.dependencies import get_db_pool, verify_api_key
+from app.models.notification_event import Actor
 from app.main import app
 from tests.conftest import make_db_record, make_extra_hours_json, make_special_days_json
 
@@ -644,6 +648,96 @@ class TestMirroredScheduleIsReadOnly:
                 json={"schedule": {"monday": {"workHours": {"start": "09:00", "end": "18:00"}}}},
             )
         assert resp.status_code == 404
+
+
+# ==================== Who made the change ====================
+
+
+ANA = Actor(email="ana@planta.cl", name="Ana Pérez")
+HOURS = {"schedule": {"monday": {"workHours": {"start": "09:00", "end": "18:00"}}}}
+
+
+@pytest.fixture
+def as_ana():
+    app.dependency_overrides[get_actor] = lambda: ANA
+    yield
+    app.dependency_overrides.pop(get_actor, None)
+
+
+class TestActorReachesTheEvent:
+    """Each notifying route hands the verified actor to its outbox event."""
+
+    @pytest.mark.asyncio
+    async def test_create(self, client, as_ana):
+        with patch(f"{CRUD_PATH}.create_with_auto_close", new_callable=AsyncMock, return_value=1) as write, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=make_db_record()):
+            resp = await client.post("/", json={"deviceId": 1, **HOURS, "validFrom": "2025-01-01"})
+        assert resp.status_code == 200
+        assert write.call_args.args[2].payload["actor"] == ANA.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_update(self, client, as_ana, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
+            resp = await client.put("/1", json=HOURS)
+        assert resp.status_code == 200
+        assert write.call_args.args[3].payload["actor"] == ANA.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_patch(self, client, as_ana, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
+            resp = await client.patch("/1", json=HOURS)
+        assert resp.status_code == 200
+        assert write.call_args.args[3].payload["actor"] == ANA.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_delete(self, client, as_ana, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True) as write:
+            resp = await client.delete("/1")
+        assert resp.status_code == 200
+        assert write.call_args.args[3].payload["actor"] == ANA.model_dump()
+
+
+class TestSaveNeverDependsOnAuthApi:
+    """The requirement that matters: identity is best-effort, the write is not."""
+
+    @pytest.mark.asyncio
+    async def test_update_succeeds_when_auth_api_is_unreachable(self, client, sample_record):
+        def refuse(request):
+            raise httpx.ConnectError("refused", request=request)
+
+        with patch.object(actor_module.settings, "AUTH_API_URL", "http://auth.test"), \
+             patch.object(actor_module, "_transport", httpx.MockTransport(refuse)), \
+             patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
+            resp = await client.put("/1", json=HOURS, headers={"Authorization": "Bearer tok"})
+        assert resp.status_code == 200
+        assert write.call_args.args[3].payload["actor"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_succeeds_when_the_token_is_rejected(self, client, sample_record):
+        with patch.object(actor_module.settings, "AUTH_API_URL", "http://auth.test"), \
+             patch.object(actor_module, "_transport", httpx.MockTransport(lambda r: httpx.Response(401))), \
+             patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
+            resp = await client.put("/1", json=HOURS, headers={"Authorization": "Bearer expired"})
+        assert resp.status_code == 200
+        assert write.call_args.args[3].payload["actor"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_without_a_bearer_still_works(self, client, sample_record):
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
+            resp = await client.put("/1", json=HOURS)
+        assert resp.status_code == 200
+        assert write.call_args.args[3].payload["actor"] is None
 
 
 # ==================== Auth ====================

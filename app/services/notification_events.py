@@ -167,6 +167,9 @@ def build_shift_change_event(ctx: ShiftChangeContext) -> Optional[OutboxEvent]:
         "breaks_changed": _breaks_changed(days),
         "validity_changed": validity_changed,
         "special_days_changed": special_days_changed,
+        # Always present, null when unknown. Deliberately left out of the
+        # dedupe key: who made a change is not part of which change it was.
+        "actor": ctx.actor.model_dump() if ctx.actor else None,
     }
 
     dedupe_key = (
