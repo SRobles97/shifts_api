@@ -66,6 +66,9 @@ async def require_schedule_editor(
 
     if resp.status_code == 401:
         raise HTTPException(status_code=401, detail="Sesión inválida o expirada")
+    if resp.status_code == 403:
+        # auth_api: deactivated account. Deny explicitly; this is not an outage.
+        raise HTTPException(status_code=403, detail="Usuario inactivo")
     if resp.status_code != 200:
         logger.warning(f"auth_api /auth/me answered {resp.status_code}, denying schedule write")
         raise _unavailable()

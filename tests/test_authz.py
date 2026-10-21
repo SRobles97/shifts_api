@@ -154,6 +154,15 @@ async def test_superuser_is_allowed(real_client, payloads, route):
     svc.assert_awaited_once()
 
 
+@pytest.mark.parametrize("route", ROUTES, ids=IDS)
+async def test_inactive_user_is_403_not_503(real_client, payloads, route):
+    code, svc = await status_for(
+        real_client, route, payloads, {"detail": "Inactive user"}, status=403
+    )
+    assert code == 403
+    svc.assert_not_awaited()
+
+
 async def test_auth_api_server_error_is_503(real_client, payloads):
     code, _ = await status_for(real_client, ROUTES[0], payloads, {}, status=500)
     assert code == 503
