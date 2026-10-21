@@ -464,6 +464,11 @@ class ScheduleService:
         raise ValueError("Either deviceId or deviceName must be provided")
 
     @staticmethod
+    async def resolve_device_id(pool: asyncpg.Pool, data: ScheduleCreate) -> int:
+        """Public wrapper so routers can authorise before creating."""
+        return await ScheduleService._resolve_device_id(pool, data)
+
+    @staticmethod
     async def create_schedule(
         pool: asyncpg.Pool, data: ScheduleCreate, actor: Optional[Actor] = None,
     ) -> ScheduleRead:

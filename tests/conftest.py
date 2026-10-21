@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.core.authz import Editor, require_schedule_editor
 from app.core.dependencies import get_db_pool, verify_api_key
 from app.main import app
 from app.models.notification_event import DeviceRef
@@ -184,6 +185,9 @@ def client(mock_pool):
     """httpx AsyncClient with dependency overrides (no real DB / no auth)."""
     app.dependency_overrides[verify_api_key] = lambda: None
     app.dependency_overrides[get_db_pool] = lambda: mock_pool
+    app.dependency_overrides[require_schedule_editor] = lambda: Editor(
+        email="test@x.cl", name="", is_superuser=True, company_roles={}
+    )
 
     yield AsyncClient(
         transport=ASGITransport(app=app),

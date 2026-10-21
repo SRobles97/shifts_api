@@ -7,12 +7,10 @@ The service layer's CRUD calls are patched to return synthetic data.
 
 from unittest.mock import ANY, AsyncMock, patch
 
-import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.core import actor as actor_module
-from app.core.actor import get_actor
+from app.core.authz import Editor, require_schedule_editor
 from app.core.dependencies import get_db_pool, verify_api_key
 from app.models.notification_event import Actor
 from app.main import app
@@ -31,6 +29,9 @@ def mock_pool():
 async def client(mock_pool):
     app.dependency_overrides[verify_api_key] = lambda: None
     app.dependency_overrides[get_db_pool] = lambda: mock_pool
+    app.dependency_overrides[require_schedule_editor] = lambda: Editor(
+        email="test@x.cl", name="", is_superuser=True, company_roles={}
+    )
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -659,9 +660,10 @@ HOURS = {"schedule": {"monday": {"workHours": {"start": "09:00", "end": "18:00"}
 
 @pytest.fixture
 def as_ana():
-    app.dependency_overrides[get_actor] = lambda: ANA
+    app.dependency_overrides[require_schedule_editor] = lambda: Editor(
+        email=ANA.email, name=ANA.name, is_superuser=True, company_roles={}
+    )
     yield
-    app.dependency_overrides.pop(get_actor, None)
 
 
 class TestActorReachesTheEvent:
@@ -700,44 +702,6 @@ class TestActorReachesTheEvent:
             resp = await client.delete("/1")
         assert resp.status_code == 200
         assert write.call_args.args[3].payload["actor"] == ANA.model_dump()
-
-
-class TestSaveNeverDependsOnAuthApi:
-    """The requirement that matters: identity is best-effort, the write is not."""
-
-    @pytest.mark.asyncio
-    async def test_update_succeeds_when_auth_api_is_unreachable(self, client, sample_record):
-        def refuse(request):
-            raise httpx.ConnectError("refused", request=request)
-
-        with patch.object(actor_module.settings, "AUTH_API_URL", "http://auth.test"), \
-             patch.object(actor_module, "_transport", httpx.MockTransport(refuse)), \
-             patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
-             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
-             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
-            resp = await client.put("/1", json=HOURS, headers={"Authorization": "Bearer tok"})
-        assert resp.status_code == 200
-        assert write.call_args.args[3].payload["actor"] is None
-
-    @pytest.mark.asyncio
-    async def test_update_succeeds_when_the_token_is_rejected(self, client, sample_record):
-        with patch.object(actor_module.settings, "AUTH_API_URL", "http://auth.test"), \
-             patch.object(actor_module, "_transport", httpx.MockTransport(lambda r: httpx.Response(401))), \
-             patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
-             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
-             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
-            resp = await client.put("/1", json=HOURS, headers={"Authorization": "Bearer expired"})
-        assert resp.status_code == 200
-        assert write.call_args.args[3].payload["actor"] is None
-
-    @pytest.mark.asyncio
-    async def test_update_without_a_bearer_still_works(self, client, sample_record):
-        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=sample_record), \
-             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock) as write, \
-             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=sample_record):
-            resp = await client.put("/1", json=HOURS)
-        assert resp.status_code == 200
-        assert write.call_args.args[3].payload["actor"] is None
 
 
 # ==================== Auth ====================
