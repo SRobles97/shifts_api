@@ -25,7 +25,7 @@ SkipReason = Literal["pilot", "no_shift_that_day", "overlaps_other_shift"]
 
 
 def _check_hhmm(value: str) -> str:
-    if not _HHMM.match(value):
+    if not _HHMM.fullmatch(value):
         raise ValueError("La hora debe tener formato HH:MM (00:00 a 23:59)")
     return value
 
@@ -188,14 +188,36 @@ class DayChangeResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class HoursRead(BaseModel):
+    """Lenient output model: migrated rows may hold legacy, non-strict values."""
+
+    start: str
+    end: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BreakRead(BaseModel):
+    """Lenient output model for breaks (no range validation)."""
+
+    start: str
+    duration_minutes: int = Field(
+        ...,
+        validation_alias=AliasChoices("durationMinutes", "duration_minutes"),
+        serialization_alias="durationMinutes",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ExceptionRead(BaseModel):
     id: int
     device_id: int = Field(..., serialization_alias="deviceId")
     shift_type: str = Field(..., serialization_alias="shiftType")
     date: date
     kind: str
-    work_hours: Optional[HoursSpec] = Field(None, serialization_alias="workHours")
-    breaks: Optional[List[BreakSpec]] = None
+    work_hours: Optional[HoursRead] = Field(None, serialization_alias="workHours")
+    breaks: Optional[List[BreakRead]] = None
     extra_minutes: Optional[int] = Field(None, serialization_alias="extraMinutes")
     extra_position: Optional[str] = Field(None, serialization_alias="extraPosition")
     reason: str = ""
