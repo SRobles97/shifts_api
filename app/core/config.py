@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     # a failed save.
     AUTH_API_URL: str = ""
     AUTH_ME_TIMEOUT_SECONDS: float = 3.0
+    # Writer cutover for per-date exceptions: when on, single-date special days
+    # go through /schedules/day-changes instead of the special_days JSON.
+    SPECIAL_DAYS_CUTOVER: bool = False
 
     class Config:
         env_file = ".env"

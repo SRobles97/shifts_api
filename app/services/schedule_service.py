@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 import asyncpg
 from loguru import logger
 
+from ..core.authz import Editor
+from ..core.config import settings
 from ..models.notification_event import Actor, DayHours, OutboxEvent
 from ..models.schedule import (
     Break,
@@ -100,6 +102,25 @@ def _assert_day_shift_within_day(
         for date_str, sd in special_days.items():
             if sd.work_hours is not None:
                 _check(f"workHours for special day {date_str}", sd.work_hours)
+
+
+_SINGLE_DATE_MESSAGE = (
+    "Los días especiales de una sola fecha se registran con 'Cambiar un día' "
+    "(/schedules/day-changes)"
+)
+
+
+def _assert_only_recurring_special_days(
+    special_days: Optional[Dict[str, SpecialDaySchema]],
+) -> None:
+    """With the cutover on, single-date special days belong to the exceptions path.
+
+    Read at call time so tests can flip the flag. Raises ValueError (HTTP 400).
+    """
+    if not settings.SPECIAL_DAYS_CUTOVER or not special_days:
+        return
+    if any(not sd.is_recurring for sd in special_days.values()):
+        raise ValueError(_SINGLE_DATE_MESSAGE)
 
 
 def _serialize_day_schedules(schedule_dict: Dict[str, DayScheduleSchema]) -> str:
@@ -535,6 +556,7 @@ class ScheduleService:
         pool: asyncpg.Pool, data: ScheduleCreate, actor: Optional[Actor] = None,
     ) -> ScheduleRead:
         _assert_day_shift_within_day(data.shift_type, data.schedule, data.special_days)
+        _assert_only_recurring_special_days(data.special_days)
         device_id = await ScheduleService._resolve_device_id(pool, data)
         await _assert_not_mirrored(pool, device_id)
 
@@ -629,6 +651,7 @@ class ScheduleService:
 
         effective_shift_type = data.shift_type if data.shift_type is not None else existing.get("shift_type", "day")
         _assert_day_shift_within_day(effective_shift_type, data.schedule, data.special_days)
+        _assert_only_recurring_special_days(data.special_days)
 
         schedule_id = existing["id"]
         update_data: Dict[str, Any] = {
@@ -680,6 +703,7 @@ class ScheduleService:
 
         effective_shift_type = data.shift_type if data.shift_type is not None else existing.get("shift_type", "day")
         _assert_day_shift_within_day(effective_shift_type, data.schedule, data.special_days)
+        _assert_only_recurring_special_days(data.special_days)
 
         schedule_id = existing["id"]
         update_data: Dict[str, Any] = {}
@@ -845,6 +869,7 @@ class ScheduleService:
     ) -> ScheduleRead:
         if not _DATE_RE.match(date_str):
             raise ValueError(_INVALID_DATE_FMT)
+        _assert_only_recurring_special_days({date_str: special_day})
 
         db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:
@@ -871,10 +896,29 @@ class ScheduleService:
     @staticmethod
     async def delete_special_day(
         pool: asyncpg.Pool, device_id: int, date_str: str,
-        shift_type: str = "day",
+        shift_type: str = "day", editor: Optional[Editor] = None,
     ) -> ScheduleDeleteResponse:
         if not _DATE_RE.match(date_str):
             raise ValueError(_INVALID_DATE_FMT)
+
+        if settings.SPECIAL_DAYS_CUTOVER and editor is not None:
+            # imported here: day_change_service imports this module
+            from . import day_change_service
+
+            day = datetime.strptime(date_str, "%Y-%m-%d").date()
+            found = [
+                r for r in await exceptions_crud.list(pool, [device_id], day, day)
+                if r["shift_type"] == shift_type
+            ]
+            if found:
+                # one email, from the removal; the JSON key goes silently so the
+                # old entry cannot resurface in readers
+                await day_change_service.remove_exception(pool, found[0]["id"], editor)
+                async with pool.acquire() as conn:
+                    await exceptions_crud.strip_jsonb_key(conn, device_id, day)
+                return ScheduleDeleteResponse(
+                    message=f"Día especial {date_str} eliminado para device_id={device_id}"
+                )
 
         db_record = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
         if not db_record:

@@ -444,7 +444,11 @@ async def delete_special_day(
     """Delete a specific special day for a device."""
     await assert_can_edit_device(pool, editor, device_id)
     try:
-        return await schedule_service.delete_special_day(pool, device_id, date, shift_type=shift_type)
+        return await schedule_service.delete_special_day(
+            pool, device_id, date, shift_type=shift_type, editor=editor
+        )
+    except HTTPException:
+        raise
     except MirroredScheduleError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
