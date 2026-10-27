@@ -150,3 +150,30 @@ def test_naive_changed_at_is_treated_as_utc():
     kw = _extra_hours_kwargs()
     kw["changed_at"] = datetime(2026, 10, 22, 17, 5)
     assert build_day_change_event(**kw).payload["changed_at"] == "2026-10-22T17:05:00+00:00"
+
+
+# --- weekday diff with extra hours ---------------------------------------
+
+
+def test_diff_days_extras_in_chronological_order_across_midnight():
+    from app.models.notification_event import DayHours
+    from app.services.notification_events_v2 import _diff_days
+
+    night = {"friday": DayHours(start="22:00", end="06:00")}
+    days = _diff_days(night, night, {}, {"friday": [("06:00", "07:00"), ("20:00", "22:00")]})
+    assert days == [
+        {
+            "day": "friday",
+            "before": "22:00–06:00",
+            "after": "20:00–22:00 + 22:00–06:00 + 06:00–07:00",
+            "change": "modified",
+        }
+    ]
+
+
+def test_diff_days_without_extras_ignores_them():
+    from app.models.notification_event import DayHours
+    from app.services.notification_events_v2 import _diff_days
+
+    day = {"monday": DayHours(start="08:00", end="17:00")}
+    assert _diff_days(day, day) == []

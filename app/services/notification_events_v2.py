@@ -9,7 +9,7 @@ to fill `devices[].days`.
 """
 
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from uuid import UUID
 
 from ..models.notification_event import (
@@ -33,8 +33,38 @@ _HOURS_SEPARATOR = "–"
 # ---------------------------------------------------------------------------
 
 
-def _format_hours(day: DayHours) -> str:
-    return f"{day.start}{_HOURS_SEPARATOR}{day.end}"
+# A weekday's extra hours as (start, end) "HH:MM" pairs.
+Extras = Sequence[Tuple[str, str]]
+
+_DAY_MINUTES = 24 * 60
+# Extras starting up to this long before the shift are read as "before" it.
+_BEFORE_WINDOW = 12 * 60
+
+
+def _clock(value: str) -> int:
+    try:
+        return int(value[:2]) * 60 + int(value[3:5])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _format_hours(day: Optional[DayHours], extras: Extras = ()) -> Optional[str]:
+    """Work hours as "HH:MM–HH:MM", extras joined by " + " in chronological order.
+
+    Order runs from the shift start, so an extra just before it comes first
+    ("06:00–08:00 + 08:00–17:00") and one after it last, also across midnight.
+    None when the day has neither work hours nor extras.
+    """
+    pieces = [(day.start, day.end)] if day else []
+    pieces += list(extras)
+    if not pieces:
+        return None
+    anchor = _clock(day.start) if day else 0
+
+    def offset(piece: Tuple[str, str]) -> int:
+        return (_clock(piece[0]) - anchor + _BEFORE_WINDOW) % _DAY_MINUTES
+
+    return " + ".join(f"{a}{_HOURS_SEPARATOR}{b}" for a, b in sorted(pieces, key=offset))
 
 
 def _format_breaks(day: DayHours) -> str:
@@ -43,7 +73,7 @@ def _format_breaks(day: DayHours) -> str:
     return ", ".join(f"{b.start} ({b.duration_minutes} min)" for b in day.breaks)
 
 
-def _ordered_days(*sources: Dict[str, DayHours]) -> List[str]:
+def _ordered_days(*sources: Mapping[str, Any]) -> List[str]:
     """Weekday-ordered union of the day keys present in any source.
 
     Anything unrecognised (there should be nothing) is appended alphabetically
@@ -55,19 +85,25 @@ def _ordered_days(*sources: Dict[str, DayHours]) -> List[str]:
     return known + unknown
 
 
-def _day_entry(name: str, before: Optional[DayHours], after: Optional[DayHours]) -> Optional[Dict[str, Any]]:
+def _day_entry(
+    name: str,
+    before: Optional[DayHours],
+    after: Optional[DayHours],
+    extras_before: Extras = (),
+    extras_after: Extras = (),
+) -> Optional[Dict[str, Any]]:
     """One row of the day diff, or None when that day did not change."""
-    hours_before = _format_hours(before) if before else None
-    hours_after = _format_hours(after) if after else None
+    hours_before = _format_hours(before, extras_before)
+    hours_after = _format_hours(after, extras_after)
     breaks_before = _format_breaks(before) if before else None
     breaks_after = _format_breaks(after) if after else None
 
     if hours_before == hours_after and breaks_before == breaks_after:
         return None
 
-    if before is None:
+    if hours_before is None:
         change = "added"
-    elif after is None:
+    elif hours_after is None:
         change = "removed"
     else:
         change = "modified"
@@ -87,11 +123,23 @@ def _day_entry(name: str, before: Optional[DayHours], after: Optional[DayHours])
 
 
 def _diff_days(
-    before: Dict[str, DayHours], after: Dict[str, DayHours]
+    before: Dict[str, DayHours],
+    after: Dict[str, DayHours],
+    extras_before: Optional[Mapping[str, Extras]] = None,
+    extras_after: Optional[Mapping[str, Extras]] = None,
 ) -> List[Dict[str, Any]]:
+    """Changed weekdays; with extras given, a change in extra hours alone counts."""
+    extras_before = extras_before or {}
+    extras_after = extras_after or {}
     entries = []
-    for name in _ordered_days(before, after):
-        entry = _day_entry(name, before.get(name), after.get(name))
+    for name in _ordered_days(before, after, extras_before, extras_after):
+        entry = _day_entry(
+            name,
+            before.get(name),
+            after.get(name),
+            extras_before.get(name, ()),
+            extras_after.get(name, ()),
+        )
         if entry is not None:
             entries.append(entry)
     return entries

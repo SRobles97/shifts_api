@@ -8,6 +8,7 @@ skipped. The preview raises a private sentinel to discard everything; the apply
 commits and enqueues a single v2 `recurring_change` event for the operation.
 """
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
@@ -23,7 +24,7 @@ from ..repositories.notification_outbox import notification_outbox_crud
 from ..schemas.day_changes import BulkDeviceResult, BulkScheduleRequest, BulkScheduleResponse
 from .day_change_service import describe_exception
 from .notification_events import _days_from_request, snapshot_from_record
-from .notification_events_v2 import _diff_days, build_recurring_change_event
+from .notification_events_v2 import Extras, _diff_days, build_recurring_change_event
 from .schedule_service import (
     _assert_day_shift_within_day,
     _serialize_day_schedules,
@@ -51,6 +52,16 @@ def _extra_hours_json(req: BulkScheduleRequest) -> Optional[str]:
     return _serialize_extra_hours(req.extra_hours) or "{}"
 
 
+def _extras(value: Any) -> Dict[str, Extras]:
+    """extra_hours jsonb (text or dict) as {weekday: [(start, end), ...]}."""
+    if isinstance(value, str):
+        value = json.loads(value)
+    return {
+        day: [(h.get("start"), h.get("end")) for h in (hours or [])]
+        for day, hours in (value or {}).items()
+    }
+
+
 async def _run(
     conn: asyncpg.Connection,
     req: BulkScheduleRequest,
@@ -65,6 +76,11 @@ async def _run(
     day_schedules_json = _serialize_day_schedules(req.schedule)
     extra_hours_json = _extra_hours_json(req)
     requested = _days_from_request(req.schedule)
+    requested_extras = (
+        None
+        if req.extra_hours is None
+        else {day: [(h.start, h.end) for h in hours] for day, hours in req.extra_hours.items()}
+    )
     pilots = await exceptions_crud.mirrored_ids(conn, ids)
 
     applied: List[BulkDeviceResult] = []
@@ -90,11 +106,14 @@ async def _run(
         )
         before = outcome["before_row"]
         before_days = snapshot_from_record(before).day_schedules if before is not None else {}
+        before_extras = _extras(before["extra_hours"]) if before is not None else {}
+        # omitted extraHours: the machine keeps (and carries) its own extras
+        after_extras = before_extras if requested_extras is None else requested_extras
         applied.append(
             BulkDeviceResult(
                 device_id=device_id,
                 label=label,
-                days=_diff_days(before_days, requested),
+                days=_diff_days(before_days, requested, before_extras, after_extras),
                 new_valid_to=outcome["new_valid_to"],
                 new_vigencia_kind=outcome["kind"],
             )

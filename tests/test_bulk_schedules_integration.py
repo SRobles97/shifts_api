@@ -435,3 +435,49 @@ async def test_bulk_rejects_day_shift_crossing_midnight(pool, env):
     with pytest.raises(ValueError):
         await apply_bulk(pool, _req([d1], schedule=bad), env["refs"], ACTOR)
     assert await _rows(pool, d1) == []
+
+
+async def test_bulk_extra_hours_only_change_emails(pool, env):
+    d1, d2 = env["d1"], env["d2"]
+    same = {d: {"workHours": {"start": s, "end": e}} for d, (s, e) in OLD_DAYS.items()}
+    await _schedule(pool, d1, extra_hours={"tuesday": [{"start": "17:00", "end": "18:00"}]})
+    await _schedule(pool, d2, extra_hours={"tuesday": [{"start": "17:00", "end": "18:00"}]})
+    new_extras = {
+        "monday": [{"start": "17:00", "end": "19:00"}, {"start": "06:00", "end": "08:00"}],
+    }
+
+    resp = await apply_bulk(
+        pool, _req([d1, d2], extra_hours=new_extras, schedule=same), env["refs"], ACTOR
+    )
+
+    expected = [
+        {
+            "day": "monday",
+            "before": "08:00–17:00",
+            "after": "06:00–08:00 + 08:00–17:00 + 17:00–19:00",
+            "change": "modified",
+        },
+        {
+            "day": "tuesday",
+            "before": "08:00–17:00 + 17:00–18:00",
+            "after": "08:00–17:00",
+            "change": "modified",
+        },
+    ]
+    assert resp.applied[0].days == expected
+    [row] = await _outbox(pool, env["company_id"])
+    payload = json.loads(row["payload"])
+    assert payload["operation"] == "recurring_change"
+    assert [d["days"] for d in payload["devices"]] == [expected, expected]
+
+
+async def test_bulk_omitted_extra_hours_is_not_a_change(pool, env):
+    d1 = env["d1"]
+    same = {d: {"workHours": {"start": s, "end": e}} for d, (s, e) in OLD_DAYS.items()}
+    await _schedule(pool, d1, extra_hours={"monday": [{"start": "17:00", "end": "18:00"}]})
+
+    resp = await apply_bulk(pool, _req([d1], schedule=same), env["refs"], ACTOR)
+
+    assert resp.applied[0].days == []
+    # carried extras, nothing to tell: no email
+    assert await _outbox(pool, env["company_id"]) == []
