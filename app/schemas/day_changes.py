@@ -17,7 +17,7 @@ from pydantic.config import ConfigDict
 
 from .schedule import DayScheduleSchema, ExtraHourSchema
 
-_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_HHMM = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _DAY_MINUTES = 24 * 60
 
 ShiftTypeLiteral = Literal["day", "night"]
@@ -194,7 +194,7 @@ class HoursRead(BaseModel):
     start: str
     end: str
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 
 class BreakRead(BaseModel):
@@ -207,7 +207,7 @@ class BreakRead(BaseModel):
         serialization_alias="durationMinutes",
     )
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 
 class ExceptionRead(BaseModel):

@@ -217,7 +217,7 @@ def test_bulk_request_device_ids_rules():
         BulkScheduleRequest.model_validate(_bulk(deviceIds=[1, 1]))
 
 
-@pytest.mark.parametrize("bad", ["08:00\n", "08:00 ", " 08:00"])
+@pytest.mark.parametrize("bad", ["08:00\n", "08:00 ", " 08:00", "\uff10\uff18:\uff10\uff10"])
 def test_hhmm_rejects_trailing_whitespace(bad):
     with pytest.raises(ValidationError):
         ChangeSpec(**_custom(work_hours={"start": bad, "end": "14:00"}))
@@ -238,3 +238,16 @@ def test_exception_read_accepts_legacy_values():
     out = row.model_dump(by_alias=True, mode="json")
     assert out["workHours"] == {"start": "8:00", "end": "8:00"}
     assert out["breaks"] == [{"start": "9:5", "durationMinutes": 1}]
+
+
+def test_exception_read_accepts_spec_instances():
+    from app.schemas.day_changes import BreakSpec, ExceptionRead, HoursSpec
+
+    row = ExceptionRead(
+        id=1, device_id=2, shift_type="day", date="2026-11-02", kind="custom_hours",
+        work_hours=HoursSpec(start="10:00", end="14:00"),
+        breaks=[BreakSpec(start="11:00", duration_minutes=15)],
+        extra_minutes=None, extra_position=None, reason="", source="api",
+    )
+    assert row.work_hours.start == "10:00"
+    assert row.breaks[0].duration_minutes == 15
