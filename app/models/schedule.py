@@ -524,7 +524,7 @@ class ScheduleEntity(BaseModel):
                     if special.work_hours:
                         return DaySchedule(
                             work_hours=special.work_hours,
-                            break_time=special.break_time,
+                            breaks=special.breaks,
                         )
                     return None
 

@@ -243,3 +243,55 @@ async def test_delete_exception_route_keeps_http_exception_status(client):
         resp = await client.delete("/schedules/exceptions/5")
     assert resp.status_code == 403
     assert resp.json()["detail"] == "no"
+
+
+# --- effective-blocks --------------------------------------------------------
+
+CRUD = "app.services.schedule_service.exceptions_crud.blocks"
+
+
+async def test_effective_blocks_returns_function_rows(client):
+    rows = [
+        {
+            "device_id": 1,
+            "shift_type": "day",
+            "shift_date": date(2026, 10, 23),
+            "block_start": _utc(8),
+            "block_end": _utc(17),
+            "kind": "regular",
+        }
+    ]
+    with patch(CRUD, new_callable=AsyncMock, return_value=rows) as blocks:
+        resp = await client.get(
+            "/schedules/effective-blocks", params={"deviceIds": "1,2", "from": "2026-10-23", "to": "2026-10-23"}
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body[0]["deviceId"] == 1 and body[0]["shiftType"] == "day"
+    assert body[0]["shiftDate"] == "2026-10-23" and body[0]["kind"] == "regular"
+    assert "start" in body[0] and "end" in body[0]
+    assert blocks.await_args.args[1:] == ([1, 2], date(2026, 10, 23), date(2026, 10, 23))
+
+
+async def test_effective_blocks_range_limit(client):
+    with patch(CRUD, new_callable=AsyncMock, return_value=[]):
+        ok = await client.get(
+            "/schedules/effective-blocks", params={"deviceIds": "1", "from": "2026-01-01", "to": "2027-02-04"}
+        )  # 400 days inclusive
+        over = await client.get(
+            "/schedules/effective-blocks", params={"deviceIds": "1", "from": "2026-01-01", "to": "2027-02-05"}
+        )  # 401 days
+        backwards = await client.get(
+            "/schedules/effective-blocks", params={"deviceIds": "1", "from": "2026-01-02", "to": "2026-01-01"}
+        )
+        empty = await client.get(
+            "/schedules/effective-blocks", params={"deviceIds": "", "from": "2026-01-01", "to": "2026-01-02"}
+        )
+        bad = await client.get(
+            "/schedules/effective-blocks", params={"deviceIds": "a", "from": "2026-01-01", "to": "2026-01-02"}
+        )
+    assert ok.status_code == 200, ok.text
+    assert over.status_code == 400
+    assert backwards.status_code == 400
+    assert empty.status_code == 400
+    assert bad.status_code == 400

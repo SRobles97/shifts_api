@@ -22,6 +22,7 @@ from ..schemas.day_changes import (
     BulkScheduleResponse,
     DayChangeRequest,
     DayChangeResponse,
+    EffectiveBlock,
     ExceptionRead,
 )
 from ..schemas.schedule import (
@@ -203,6 +204,32 @@ async def list_exceptions(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al listar las excepciones: {e}")
+
+
+@router.get(
+    "/effective-blocks",
+    response_model=List[EffectiveBlock],
+    response_model_by_alias=True,
+    responses=RESPONSES_400_500,
+)
+async def get_effective_blocks(
+    pool: Pool,
+    _: ApiKey,
+    device_ids: Annotated[str, Query(alias="deviceIds", description="Comma-separated device ids")],
+    range_from: Annotated[date, Query(alias="from", description="Start date (YYYY-MM-DD)")],
+    range_to: Annotated[date, Query(alias="to", description="End date (YYYY-MM-DD), at most 400 days in total")],
+):
+    """Work blocks of several machines in a date range, with exceptions and overtime applied."""
+    try:
+        ids = [int(x) for x in device_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="deviceIds debe ser una lista de enteros separados por coma")
+    try:
+        return await schedule_service.get_effective_blocks(pool, ids, range_from, range_to)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener los bloques efectivos: {e}")
 
 
 @router.delete("/exceptions/{exception_id}", response_model=ScheduleDeleteResponse, responses=RESPONSES_404_500)
@@ -436,7 +463,11 @@ async def get_effective_schedule(
     _: ApiKey,
     shift_type: ShiftTypeQuery = "day",
 ):
-    """Get the effective schedule for a device on a specific date."""
+    """Get the effective schedule for a device on a specific date.
+
+    Obsoleto: no conoce las excepciones por fecha ni las horas extras, y su forma
+    (un solo tramo) no las puede representar. Usar /effective-blocks.
+    """
     try:
         return await schedule_service.get_effective_schedule(pool, device_id, date, shift_type=shift_type)
     except LookupError as e:

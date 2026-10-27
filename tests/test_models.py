@@ -442,3 +442,26 @@ class TestScheduleEntity:
         # 2025-12-25 should match the recurring pattern (month-day match)
         eff = entity.get_effective_schedule_for_date(date(2025, 12, 25))
         assert eff is None  # holiday = no work
+
+    def test_effective_schedule_recurring_special_no_crash(self, base_schedule):
+        """A recurring special day with hours used to crash on a non-existent break_time."""
+        entity = ScheduleEntity(
+            device_id=1,
+            schedule=base_schedule,
+            valid_from=date(2025, 1, 1),
+            special_days={
+                "2024-12-24": SpecialDay(
+                    name="Nochebuena",
+                    type=SpecialDayType.SPECIAL_EVENT,
+                    is_recurring=True,
+                    recurrence_pattern=RecurrencePattern.YEARLY,
+                    work_hours=WorkHours(start="08:00", end="13:00"),
+                    breaks=[Break(start="11:00", duration_minutes=30)],
+                )
+            },
+        )
+        eff = entity.get_effective_schedule_for_date(date(2025, 12, 24))
+        assert eff is not None
+        assert eff.work_hours.end == "13:00"
+        assert eff.breaks[0].start == "11:00"
+

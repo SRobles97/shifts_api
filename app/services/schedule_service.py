@@ -29,6 +29,7 @@ from ..models.schedule import (
 from ..repositories.crud import schedule_crud
 from ..repositories.devices import device_crud
 from ..repositories.exceptions import exceptions_crud
+from ..schemas.day_changes import EffectiveBlock
 from .exception_summary import kept_exception_entries
 from .notification_events import _days_from_request, extras_from_jsonb, snapshot_from_record
 from .notification_events_v2 import Extras, _diff_days, build_recurring_change_event
@@ -390,6 +391,9 @@ def _db_record_to_entity(db_record: dict) -> ScheduleEntity:
         version=db_record["version"],
         source=db_record["source"],
     )
+
+
+MAX_BLOCKS_RANGE_DAYS = 400
 
 
 class MirroredScheduleError(Exception):
@@ -933,6 +937,31 @@ class ScheduleService:
             ),
             breaks=breaks_schema,
         )
+
+
+    @staticmethod
+    async def get_effective_blocks(
+        pool: asyncpg.Pool, device_ids: List[int], d_from: date, d_to: date
+    ) -> List[EffectiveBlock]:
+        """Work blocks of several machines between two dates (both included), exceptions applied."""
+        if not device_ids:
+            raise ValueError("Debe indicar al menos una máquina")
+        if d_to < d_from:
+            raise ValueError("La fecha 'to' no puede ser anterior a 'from'")
+        if (d_to - d_from).days + 1 > MAX_BLOCKS_RANGE_DAYS:
+            raise ValueError(f"El rango no puede superar {MAX_BLOCKS_RANGE_DAYS} días")
+        rows = await exceptions_crud.blocks(pool, device_ids, d_from, d_to)
+        return [
+            EffectiveBlock(
+                device_id=r["device_id"],
+                shift_type=r["shift_type"],
+                shift_date=r["shift_date"],
+                start=r["block_start"],
+                end=r["block_end"],
+                kind=r["kind"],
+            )
+            for r in rows
+        ]
 
 
 schedule_service = ScheduleService()
