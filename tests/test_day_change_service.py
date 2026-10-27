@@ -234,3 +234,12 @@ async def test_delete_exception_error_mapping(client):
         assert (await client.delete("/schedules/exceptions/5")).status_code == 404
     with patch(f"{SVC}.remove_exception", new_callable=AsyncMock, side_effect=MirroredScheduleError("piloto")):
         assert (await client.delete("/schedules/exceptions/5")).status_code == 409
+
+
+async def test_delete_exception_route_keeps_http_exception_status(client):
+    from fastapi import HTTPException
+
+    with patch(f"{SVC}.remove_exception", new_callable=AsyncMock, side_effect=HTTPException(status_code=403, detail="no")):
+        resp = await client.delete("/schedules/exceptions/5")
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "no"

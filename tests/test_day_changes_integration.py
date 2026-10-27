@@ -567,3 +567,48 @@ async def test_delete_pilot_409(pool, env):
 
     assert len(await _exceptions(pool, d2)) == 1
     assert await _outbox(pool, env["company_id"]) == []
+
+
+async def test_delete_by_manager_of_another_company_403_and_nothing_deleted(pool, env):
+    from fastapi import HTTPException
+
+    d1 = env["d1"]
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")})
+    exc_id = await _insert_exception(pool, d1, FRIDAY)
+    other = Editor(
+        email="o@x.cl", name="Otro", is_superuser=False,
+        company_roles={env["company_id"] + 100000: "MANAGER"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await remove_exception(pool, exc_id, other)
+
+    assert exc.value.status_code == 403
+    assert len(await _exceptions(pool, d1)) == 1
+    assert await _outbox(pool, env["company_id"]) == []
+
+
+async def test_delete_route_403_end_to_end(pool, env):
+    from httpx import ASGITransport, AsyncClient
+
+    from app.core.authz import require_schedule_editor
+    from app.core.dependencies import get_db_pool, verify_api_key
+    from app.main import app
+
+    d1 = env["d1"]
+    exc_id = await _insert_exception(pool, d1, FRIDAY)
+    other = Editor(
+        email="o@x.cl", name="Otro", is_superuser=False,
+        company_roles={env["company_id"] + 100000: "MANAGER"},
+    )
+    app.dependency_overrides[get_db_pool] = lambda: pool
+    app.dependency_overrides[verify_api_key] = lambda: None
+    app.dependency_overrides[require_schedule_editor] = lambda: other
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.delete(f"/schedules/exceptions/{exc_id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 403, resp.text
+    assert len(await _exceptions(pool, d1)) == 1

@@ -210,6 +210,8 @@ async def remove_exception(
     try:
         await day_change_service.remove_exception(pool, exception_id, editor)
         return ScheduleDeleteResponse(message=f"Excepción {exception_id} eliminada correctamente")
+    except HTTPException:
+        raise
     except MirroredScheduleError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:

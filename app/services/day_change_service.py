@@ -330,9 +330,9 @@ def _change_from_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         "kind": row["kind"],
         "minutes": row["extra_minutes"],
         "position": row["extra_position"],
-        "work_hours": {"start": hours["start"], "end": hours["end"]} if hours else None,
+        "work_hours": {"start": hours.get("start"), "end": hours.get("end")} if hours else None,
         "breaks": [
-            {"start": b["start"], "duration_minutes": b.get("durationMinutes", b.get("duration_minutes"))}
+            {"start": b.get("start"), "duration_minutes": b.get("durationMinutes", b.get("duration_minutes"))}
             for b in breaks
         ]
         if breaks
