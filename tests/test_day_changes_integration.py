@@ -497,10 +497,11 @@ async def test_list_filters_by_devices_and_range(pool, env):
 
 
 async def test_list_range_over_400_days_400(pool, env):
+    # 401 days, both ends included
     with pytest.raises(ValueError):
-        await list_exceptions(pool, [env["d1"]], date(2026, 1, 1), date(2027, 2, 6))
-    # exactly 400 days is allowed
-    await list_exceptions(pool, [env["d1"]], date(2026, 1, 1), date(2027, 2, 5))
+        await list_exceptions(pool, [env["d1"]], date(2026, 1, 1), date(2027, 2, 5))
+    # exactly 400 days inclusive is allowed, like /effective-blocks
+    await list_exceptions(pool, [env["d1"]], date(2026, 1, 1), date(2027, 2, 4))
 
 
 async def test_delete_writes_removed_event(pool, env):

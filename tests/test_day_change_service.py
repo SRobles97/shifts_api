@@ -3,6 +3,8 @@
 import json
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
+
+import pytest
 from uuid import uuid4
 
 from app.core import authz as authz_module
@@ -223,6 +225,45 @@ async def test_get_exceptions_range_over_400_days_400(client):
         "/schedules/exceptions", params={"deviceIds": "1", "from": "2026-01-01", "to": "2027-03-01"}
     )
     assert resp.status_code == 400
+
+
+async def test_get_exceptions_range_matches_effective_blocks(client):
+    with patch(
+        "app.services.day_change_service.exceptions_crud.list", new_callable=AsyncMock, return_value=[]
+    ):
+        ok = await client.get(
+            "/schedules/exceptions", params={"deviceIds": "1", "from": "2026-01-01", "to": "2027-02-04"}
+        )  # 400 days inclusive
+        over = await client.get(
+            "/schedules/exceptions", params={"deviceIds": "1", "from": "2026-01-01", "to": "2027-02-05"}
+        )  # 401 days
+    assert ok.status_code == 200, ok.text
+    assert over.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "path,target",
+    [
+        ("/schedules/exceptions", f"{SVC}.list_exceptions"),
+        ("/schedules/effective-blocks", "app.routers.schedules.schedule_service.get_effective_blocks"),
+    ],
+)
+async def test_device_ids_deduped_and_capped(client, path, target):
+    window = {"from": "2026-10-01", "to": "2026-10-31"}
+    many = ",".join(str(i) for i in range(1, 202))
+    two_hundred_with_repeats = ",".join(str(i) for i in list(range(1, 201)) + [1, 2])
+    with patch(target, new_callable=AsyncMock, return_value=[]) as svc:
+        dup = await client.get(path, params={"deviceIds": "3,1,3,2,1", **window})
+        assert dup.status_code == 200, dup.text
+        assert svc.await_args.args[1] == [3, 1, 2]
+        capped = await client.get(path, params={"deviceIds": two_hundred_with_repeats, **window})
+        assert capped.status_code == 200, capped.text
+        assert len(svc.await_args.args[1]) == 200
+        svc.reset_mock()
+        over = await client.get(path, params={"deviceIds": many, **window})
+    assert over.status_code == 400
+    assert over.json()["detail"] == "Máximo 200 máquinas por consulta"
+    svc.assert_not_awaited()
 
 
 async def test_get_exceptions_bad_ids_400(client):

@@ -185,19 +185,31 @@ async def apply_day_change(
         raise HTTPException(status_code=500, detail=f"Error al aplicar el cambio del día: {e}")
 
 
+MAX_QUERY_DEVICES = 200
+
+
+def _parse_device_ids(device_ids: str) -> List[int]:
+    """deviceIds query of the multi-machine reads: unique, in order, at most 200."""
+    try:
+        ids = [int(x) for x in device_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="deviceIds debe ser una lista de enteros separados por coma")
+    ids = list(dict.fromkeys(ids))
+    if len(ids) > MAX_QUERY_DEVICES:
+        raise HTTPException(status_code=400, detail=f"Máximo {MAX_QUERY_DEVICES} máquinas por consulta")
+    return ids
+
+
 @router.get("/exceptions", response_model=List[ExceptionRead], response_model_by_alias=True, responses=RESPONSES_400_500)
 async def list_exceptions(
     pool: Pool,
     _: ApiKey,
     device_ids: Annotated[str, Query(alias="deviceIds", description="Comma-separated device ids")],
     range_from: Annotated[date, Query(alias="from", description="Start date (YYYY-MM-DD)")],
-    range_to: Annotated[date, Query(alias="to", description="End date (YYYY-MM-DD), at most 400 days after from")],
+    range_to: Annotated[date, Query(alias="to", description="End date (YYYY-MM-DD), at most 400 days in total")],
 ):
     """List per-date exceptions of several machines in a date range."""
-    try:
-        ids = [int(x) for x in device_ids.split(",") if x.strip()]
-    except ValueError:
-        raise HTTPException(status_code=400, detail="deviceIds debe ser una lista de enteros separados por coma")
+    ids = _parse_device_ids(device_ids)
     try:
         return await day_change_service.list_exceptions(pool, ids, range_from, range_to)
     except ValueError as e:
@@ -220,10 +232,7 @@ async def get_effective_blocks(
     range_to: Annotated[date, Query(alias="to", description="End date (YYYY-MM-DD), at most 400 days in total")],
 ):
     """Work blocks of several machines in a date range, with exceptions and overtime applied."""
-    try:
-        ids = [int(x) for x in device_ids.split(",") if x.strip()]
-    except ValueError:
-        raise HTTPException(status_code=400, detail="deviceIds debe ser una lista de enteros separados por coma")
+    ids = _parse_device_ids(device_ids)
     try:
         return await schedule_service.get_effective_blocks(pool, ids, range_from, range_to)
     except ValueError as e:

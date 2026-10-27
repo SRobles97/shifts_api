@@ -291,7 +291,7 @@ async def list_exceptions(
     """Exceptions of the given machines between two dates, both included."""
     if d_to < d_from:
         raise ValueError("La fecha 'to' no puede ser anterior a 'from'")
-    if (d_to - d_from).days > MAX_LIST_RANGE_DAYS:
+    if (d_to - d_from).days + 1 > MAX_LIST_RANGE_DAYS:
         raise ValueError(f"El rango no puede superar {MAX_LIST_RANGE_DAYS} días")
     if not device_ids:
         return []
