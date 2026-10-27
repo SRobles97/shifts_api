@@ -362,11 +362,14 @@ async def remove_exception(pool: asyncpg.Pool, exception_id: int, editor: Editor
                 await exceptions_crud.strip_jsonb_key(conn, device_id, day)
             tz = (await exceptions_crud.timezones(conn, [device_id])).get(device_id, DEFAULT_TZ)
             after = await exceptions_crud.blocks(conn, [device_id], day, day + timedelta(days=1))
+            # the day is back on its habitual schedule: regular == result
+            weekly = format_blocks(_of_shift(after, device_id, shift_type, day), tz)
             result = DayChangeDeviceResult(
                 device_id=device_id,
                 label=ref.label,
                 shift_type=shift_type,
-                result=format_blocks(_of_shift(after, device_id, shift_type, day), tz),
+                regular=weekly,
+                result=weekly,
                 replaced=describe_exception(deleted),
             )
             event = build_day_change_event(

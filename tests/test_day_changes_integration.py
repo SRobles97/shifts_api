@@ -527,6 +527,7 @@ async def test_delete_writes_removed_event(pool, env):
     assert dev["id"] == d1 and dev["label"] == "Fresadora 1"
     assert dev["replaced"] == "+2 h extras después"
     assert dev["result"] == "08:00–17:00"
+    assert dev["regular"] == dev["result"]
     assert payload["actor"] == {"email": "m@x.cl", "name": "Mia"}
 
 
