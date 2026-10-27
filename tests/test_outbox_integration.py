@@ -32,6 +32,7 @@ import pytest
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
 from app.repositories.crud import schedule_crud
 from app.services.schedule_service import MirroredScheduleError, ScheduleService
+from tests.integration_support import make_row_count_tripwire
 
 DSN = os.getenv("SHIFTS_TEST_DSN")
 
@@ -63,37 +64,9 @@ async def pool():
     await p.close()
 
 
-async def _row_counts(pool):
-    """Totals for the tables this suite writes to, for the session-wide guard."""
-    async with pool.acquire() as conn:
-        return {
-            table: await conn.fetchval(f"SELECT count(*) FROM {table};")
-            for table in ("companies", "devices", "device_schedules", "notification_outbox")
-        }
-
-
-@pytest.fixture(scope="session", autouse=True)
-async def _no_foreign_rows_harmed():
-    """Fail the run if this suite left any row behind, or removed one it did not own.
-
-    Scoped teardown is the actual safeguard; this is the tripwire that proves it
-    still works. Session-scoped so it brackets the whole module, and it opens its
-    own pool because the per-test `pool` fixture is function-scoped.
-    """
-    if not DSN:
-        yield
-        return
-    p = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
-    try:
-        before = await _row_counts(p)
-        yield
-        after = await _row_counts(p)
-    finally:
-        await p.close()
-    assert after == before, (
-        "This suite must only touch rows it created. Row counts changed: "
-        f"{ {t: (before[t], after[t]) for t in before if before[t] != after[t]} }"
-    )
+_no_foreign_rows_harmed = make_row_count_tripwire(
+    DSN, ("companies", "devices", "device_schedules", "notification_outbox")
+)
 
 
 @pytest.fixture(autouse=True)
