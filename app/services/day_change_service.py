@@ -18,16 +18,24 @@ from zoneinfo import ZoneInfo
 import asyncpg
 from loguru import logger
 
+from ..core.authz import Editor, assert_can_edit_devices
 from ..models.notification_event import Actor, DeviceRef
 from ..repositories.exceptions import exceptions_crud
 from ..repositories.notification_outbox import notification_outbox_crud
-from ..schemas.day_changes import DayChangeDeviceResult, DayChangeRequest, DayChangeResponse
+from ..schemas.day_changes import (
+    DayChangeDeviceResult,
+    DayChangeRequest,
+    DayChangeResponse,
+    ExceptionRead,
+)
 from .notification_events_v2 import build_day_change_event
+from .schedule_service import _MIRRORED_MESSAGE, MirroredScheduleError
 
 DEFAULT_TZ = "America/Santiago"
 NO_WORK_LABEL = "Sin trabajo"
 _DASH = "–"
 _POSITION_LABELS = {"after": "después", "before": "antes"}
+MAX_LIST_RANGE_DAYS = 400
 
 
 class _PreviewRollback(Exception):
@@ -280,3 +288,97 @@ async def apply_day_change(
     return DayChangeResponse(
         operation_id=operation_id, date=req.date, applied=applied, skipped=skipped
     )
+
+
+# ---------------------------------------------------------------------------
+# List and remove
+# ---------------------------------------------------------------------------
+
+
+def _json_value(value: Any) -> Any:
+    # no jsonb codec on the pool: asyncpg hands jsonb columns back as text
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _exception_read(row: Mapping[str, Any]) -> ExceptionRead:
+    data = dict(row)
+    data["work_hours"] = _json_value(data.get("work_hours"))
+    data["breaks"] = _json_value(data.get("breaks"))
+    data["reason"] = data.get("reason") or ""
+    return ExceptionRead.model_validate(data)
+
+
+async def list_exceptions(
+    pool: asyncpg.Pool, device_ids: List[int], d_from: date, d_to: date
+) -> List[ExceptionRead]:
+    """Exceptions of the given machines between two dates, both included."""
+    if d_to < d_from:
+        raise ValueError("La fecha 'to' no puede ser anterior a 'from'")
+    if (d_to - d_from).days > MAX_LIST_RANGE_DAYS:
+        raise ValueError(f"El rango no puede superar {MAX_LIST_RANGE_DAYS} días")
+    if not device_ids:
+        return []
+    rows = await exceptions_crud.list(pool, device_ids, d_from, d_to)
+    return [_exception_read(r) for r in rows]
+
+
+def _change_from_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The removed exception as a ChangeSpec.model_dump(mode="json") dict."""
+    hours = _json_value(row["work_hours"])
+    breaks = _json_value(row["breaks"])
+    return {
+        "kind": row["kind"],
+        "minutes": row["extra_minutes"],
+        "position": row["extra_position"],
+        "work_hours": {"start": hours["start"], "end": hours["end"]} if hours else None,
+        "breaks": [
+            {"start": b["start"], "duration_minutes": b.get("durationMinutes", b.get("duration_minutes"))}
+            for b in breaks
+        ]
+        if breaks
+        else None,
+        "reason": row["reason"] or "",
+    }
+
+
+async def remove_exception(pool: asyncpg.Pool, exception_id: int, editor: Editor) -> None:
+    """Delete one per-date exception and enqueue the "removed" email."""
+    row = await exceptions_crud.get(pool, exception_id)
+    if row is None:
+        raise LookupError(f"Excepción {exception_id} no encontrada")
+    device_id, shift_type, day = row["device_id"], row["shift_type"], row["date"]
+    refs = await assert_can_edit_devices(pool, editor, [device_id])
+    ref = refs[device_id]
+    if device_id in await exceptions_crud.mirrored_ids(pool, [device_id]):
+        raise MirroredScheduleError(_MIRRORED_MESSAGE)
+
+    operation_id = uuid4()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            deleted = await exceptions_crud.delete(conn, exception_id)
+            if deleted is None:
+                raise LookupError(f"Excepción {exception_id} no encontrada")
+            if deleted["source"] == "migrated":
+                await exceptions_crud.strip_jsonb_key(conn, device_id, day)
+            tz = (await exceptions_crud.timezones(conn, [device_id])).get(device_id, DEFAULT_TZ)
+            after = await exceptions_crud.blocks(conn, [device_id], day, day + timedelta(days=1))
+            result = DayChangeDeviceResult(
+                device_id=device_id,
+                label=ref.label,
+                shift_type=shift_type,
+                result=format_blocks(_of_shift(after, device_id, shift_type, day), tz),
+                replaced=describe_exception(deleted),
+            )
+            event = build_day_change_event(
+                company_id=ref.company_id,
+                operation_id=operation_id,
+                changed_at=datetime.now(timezone.utc),
+                actor=editor.actor(),
+                day=day,
+                change=_change_from_row(deleted),
+                devices=[_event_device(result)],
+                skipped=[],
+                removed=True,
+            )
+            await notification_outbox_crud.insert_if_present(conn, event)
+    logger.info(f"Exception {exception_id} removed ({operation_id}) on {day} for device {device_id}")

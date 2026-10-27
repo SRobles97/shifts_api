@@ -185,3 +185,52 @@ async def test_service_value_error_is_400(client):
 async def test_invalid_body_is_422(client):
     resp = await client.post("/schedules/day-changes", json={**BODY, "deviceIds": []})
     assert resp.status_code == 422
+
+
+# --- list / remove routes ----------------------------------------------------
+
+
+async def test_get_exceptions_route_parses_query(client):
+    from app.schemas.day_changes import ExceptionRead
+
+    row = ExceptionRead(
+        id=7, device_id=1, shift_type="day", date=date(2026, 10, 23), kind="no_work", source="ui"
+    )
+    with patch(f"{SVC}.list_exceptions", new_callable=AsyncMock, return_value=[row]) as lst:
+        resp = await client.get(
+            "/schedules/exceptions", params={"deviceIds": "1,2", "from": "2026-10-01", "to": "2026-10-31"}
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["deviceId"] == 1 and resp.json()[0]["shiftType"] == "day"
+    assert lst.await_args.args[1:] == ([1, 2], date(2026, 10, 1), date(2026, 10, 31))
+
+
+async def test_get_exceptions_range_over_400_days_400(client):
+    resp = await client.get(
+        "/schedules/exceptions", params={"deviceIds": "1", "from": "2026-01-01", "to": "2027-03-01"}
+    )
+    assert resp.status_code == 400
+
+
+async def test_get_exceptions_bad_ids_400(client):
+    resp = await client.get(
+        "/schedules/exceptions", params={"deviceIds": "a,b", "from": "2026-01-01", "to": "2026-01-02"}
+    )
+    assert resp.status_code == 400
+
+
+async def test_delete_exception_route_not_shadowed_by_device_id(client):
+    with patch(f"{SVC}.remove_exception", new_callable=AsyncMock) as rm:
+        resp = await client.delete("/schedules/exceptions/5")
+    assert resp.status_code == 200, resp.text
+    rm.assert_awaited_once()
+    assert rm.await_args.args[1] == 5
+
+
+async def test_delete_exception_error_mapping(client):
+    from app.services.schedule_service import MirroredScheduleError
+
+    with patch(f"{SVC}.remove_exception", new_callable=AsyncMock, side_effect=LookupError("no")):
+        assert (await client.delete("/schedules/exceptions/5")).status_code == 404
+    with patch(f"{SVC}.remove_exception", new_callable=AsyncMock, side_effect=MirroredScheduleError("piloto")):
+        assert (await client.delete("/schedules/exceptions/5")).status_code == 409

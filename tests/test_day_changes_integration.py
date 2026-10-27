@@ -14,10 +14,17 @@ from zoneinfo import ZoneInfo
 import asyncpg
 import pytest
 
+from app.core.authz import Editor
 from app.models.notification_event import Actor, DeviceRef
 from app.repositories.exceptions import exceptions_crud
 from app.schemas.day_changes import DayChangeRequest
-from app.services.day_change_service import apply_day_change, preview_day_change
+from app.services.day_change_service import (
+    apply_day_change,
+    list_exceptions,
+    preview_day_change,
+    remove_exception,
+)
+from app.services.schedule_service import MirroredScheduleError
 from tests.integration_support import make_row_count_tripwire
 
 DSN = os.getenv("SHIFTS_TEST_DSN")
@@ -438,3 +445,124 @@ async def test_no_work_result_says_sin_trabajo(pool, env):
     [res] = resp.applied
     assert res.regular == "08:00–17:00"
     assert res.result == "Sin trabajo"
+
+
+# --- list and remove ------------------------------------------------------
+
+EDITOR = Editor(email="m@x.cl", name="Mia", is_superuser=True)
+
+
+async def _insert_exception(pool, device_id, day, kind="no_work", source="ui", **cols):
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO device_schedule_exceptions
+                (device_id, shift_type, date, kind, work_hours, breaks, extra_minutes,
+                 extra_position, reason, operation_id, source)
+            VALUES ($1, 'day', $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10)
+            RETURNING id;
+            """,
+            device_id,
+            day,
+            kind,
+            cols.get("work_hours"),
+            cols.get("breaks"),
+            cols.get("extra_minutes"),
+            cols.get("extra_position"),
+            cols.get("reason", ""),
+            uuid.uuid4(),
+            source,
+        )
+
+
+async def test_list_filters_by_devices_and_range(pool, env):
+    d1, d2 = env["d1"], env["d2"]
+    inside = await _insert_exception(
+        pool, d1, FRIDAY, "custom_hours",
+        work_hours=json.dumps({"start": "09:00", "end": "13:00"}),
+        breaks=json.dumps([{"start": "11:00", "durationMinutes": 30}]),
+    )
+    await _insert_exception(pool, d1, date(2026, 12, 1))
+    await _insert_exception(pool, d2, FRIDAY)
+
+    rows = await list_exceptions(pool, [d1], date(2026, 10, 20), date(2026, 10, 30))
+
+    assert [r.id for r in rows] == [inside]
+    assert rows[0].work_hours.start == "09:00"
+    assert rows[0].breaks[0].duration_minutes == 30
+    both = await list_exceptions(pool, [d1, d2], FRIDAY, FRIDAY)
+    assert {r.device_id for r in both} == {d1, d2}
+
+
+async def test_list_range_over_400_days_400(pool, env):
+    with pytest.raises(ValueError):
+        await list_exceptions(pool, [env["d1"]], date(2026, 1, 1), date(2027, 2, 6))
+    # exactly 400 days is allowed
+    await list_exceptions(pool, [env["d1"]], date(2026, 1, 1), date(2027, 2, 5))
+
+
+async def test_delete_writes_removed_event(pool, env):
+    d1 = env["d1"]
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")})
+    await apply_day_change(pool, _req([d1], EXTRA_AFTER), env["refs"], ACTOR)
+    [row] = await _exceptions(pool, d1)
+    before = len(await _outbox(pool, env["company_id"]))
+
+    await remove_exception(pool, row["id"], EDITOR)
+
+    assert await _exceptions(pool, d1) == []
+    rows = await _outbox(pool, env["company_id"])
+    assert len(rows) == before + 1
+    removed = [r for r in rows if json.loads(r["payload"])["operation"] == "day_change_removed"]
+    assert len(removed) == 1
+    assert removed[0]["dedupe_key"].startswith("shift_change:")
+    payload = json.loads(removed[0]["payload"])
+    assert payload["date"] == FRIDAY.isoformat()
+    assert payload["change"] == {
+        "kind": "extra_hours", "minutes": 120, "position": "after",
+        "work_hours": None, "breaks": None, "reason": "",
+    }
+    assert payload["change"] == _req([d1], EXTRA_AFTER).change.model_dump(mode="json")
+    [dev] = payload["devices"]
+    assert dev["id"] == d1 and dev["label"] == "Fresadora 1"
+    assert dev["replaced"] == "+2 h extras después"
+    assert dev["result"] == "08:00–17:00"
+    assert payload["actor"] == {"email": "m@x.cl", "name": "Mia"}
+
+
+async def test_delete_migrated_exception_strips_jsonb_key(pool, env):
+    d1 = env["d1"]
+    special = {
+        FRIDAY.isoformat(): {"name": "Sin trabajo", "type": "holiday", "workHours": None},
+        "2026-10-30": {"name": "Sin trabajo", "type": "holiday", "workHours": None},
+    }
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")}, special_days=special)
+    exc_id = await _insert_exception(pool, d1, FRIDAY, "no_work", source="migrated")
+
+    await remove_exception(pool, exc_id, EDITOR)
+
+    keys = await pool.fetchval("SELECT special_days FROM device_schedules WHERE device_id = $1;", d1)
+    assert set(json.loads(keys)) == {"2026-10-30"}
+    blocks = await exceptions_crud.blocks(pool, [d1], FRIDAY, FRIDAY)
+    tz = ZoneInfo("America/Santiago")
+    assert [(r["block_start"].astimezone(tz).strftime("%H:%M"), r["block_end"].astimezone(tz).strftime("%H:%M")) for r in blocks] == [("08:00", "17:00")]
+    payload = json.loads((await _outbox(pool, env["company_id"]))[0]["payload"])
+    assert payload["devices"][0]["replaced"] == "Sin trabajo"
+    assert payload["devices"][0]["result"] == "08:00–17:00"
+
+
+async def test_delete_unknown_404(pool, env):
+    with pytest.raises(LookupError):
+        await remove_exception(pool, 2_000_000_000, EDITOR)
+
+
+async def test_delete_pilot_409(pool, env):
+    d2 = env["d2"]
+    await _schedule(pool, d2, {"friday": ("08:00", "17:00")}, source="pilot_mirror")
+    exc_id = await _insert_exception(pool, d2, FRIDAY)
+
+    with pytest.raises(MirroredScheduleError):
+        await remove_exception(pool, exc_id, EDITOR)
+
+    assert len(await _exceptions(pool, d2)) == 1
+    assert await _outbox(pool, env["company_id"]) == []

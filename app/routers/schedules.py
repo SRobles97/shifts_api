@@ -17,7 +17,7 @@ from ..core.authz import (
     require_schedule_editor,
 )
 from ..core.dependencies import get_db_pool, verify_api_key
-from ..schemas.day_changes import DayChangeRequest, DayChangeResponse
+from ..schemas.day_changes import DayChangeRequest, DayChangeResponse, ExceptionRead
 from ..schemas.schedule import (
     AllScheduleStatsResponse,
     DayScheduleSchema,
@@ -176,6 +176,48 @@ async def apply_day_change(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al aplicar el cambio del día: {e}")
+
+
+@router.get("/exceptions", response_model=List[ExceptionRead], response_model_by_alias=True, responses=RESPONSES_400_500)
+async def list_exceptions(
+    pool: Pool,
+    _: ApiKey,
+    device_ids: Annotated[str, Query(alias="deviceIds", description="Comma-separated device ids")],
+    range_from: Annotated[date, Query(alias="from", description="Start date (YYYY-MM-DD)")],
+    range_to: Annotated[date, Query(alias="to", description="End date (YYYY-MM-DD), at most 400 days after from")],
+):
+    """List per-date exceptions of several machines in a date range."""
+    try:
+        ids = [int(x) for x in device_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="deviceIds debe ser una lista de enteros separados por coma")
+    try:
+        return await day_change_service.list_exceptions(pool, ids, range_from, range_to)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar las excepciones: {e}")
+
+
+@router.delete("/exceptions/{exception_id}", response_model=ScheduleDeleteResponse, responses=RESPONSES_404_500)
+async def remove_exception(
+    exception_id: int,
+    pool: Pool,
+    _: ApiKey,
+    editor: ScheduleEditor,
+):
+    """Remove one per-date exception (one email)."""
+    try:
+        await day_change_service.remove_exception(pool, exception_id, editor)
+        return ScheduleDeleteResponse(message=f"Excepción {exception_id} eliminada correctamente")
+    except MirroredScheduleError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar la excepción: {e}")
 
 
 @router.put("/{device_id}", response_model=ScheduleRead, responses=RESPONSES_404_400_500)
