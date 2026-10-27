@@ -9,12 +9,13 @@ The router maps these to HTTP status codes.
 import json
 import re
 from datetime import date, datetime, time, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
+from uuid import uuid4
 
 import asyncpg
 from loguru import logger
 
-from ..models.notification_event import Actor, ShiftChangeContext
+from ..models.notification_event import Actor, DayHours, OutboxEvent
 from ..models.schedule import (
     Break,
     DaySchedule,
@@ -26,11 +27,10 @@ from ..models.schedule import (
 )
 from ..repositories.crud import schedule_crud
 from ..repositories.devices import device_crud
-from .notification_events import (
-    build_shift_change_event,
-    snapshot_from_record,
-    snapshot_from_request,
-)
+from ..repositories.exceptions import exceptions_crud
+from .exception_summary import kept_exception_entries
+from .notification_events import _days_from_request, extras_from_jsonb, snapshot_from_record
+from .notification_events_v2 import Extras, _diff_days, build_recurring_change_event
 from ..schemas.schedule import (
     AllScheduleStatsResponse,
     BreakSchema,
@@ -412,35 +412,84 @@ async def _assert_not_mirrored(pool: asyncpg.Pool, device_id: int) -> None:
         raise MirroredScheduleError(_MIRRORED_MESSAGE)
 
 
-async def _shift_change_event(
-    pool: asyncpg.Pool,
-    context: Dict[str, Any],
-):
-    """Build the outbox event for a schedule change, or None to send nothing.
+def _request_extras(extra_hours: Optional[Mapping[str, Any]]) -> Dict[str, Extras]:
+    """A request's extraHours as {weekday: [(start, end), ...]}."""
+    return {
+        day: [(h.start, h.end) for h in hours]
+        for day, hours in (extra_hours or {}).items()
+    }
 
-    Returns None when the device cannot be resolved. `device_schedules.device_id`
+
+async def _recurring_change_event(
+    pool: asyncpg.Pool,
+    *,
+    device_id: int,
+    shift_type: str,
+    before: Optional[Mapping[str, Any]],
+    after_days: Dict[str, DayHours],
+    after_extras: Dict[str, Extras],
+    valid_from: date,
+    valid_to: Optional[date],
+    actor: Optional[Actor],
+    is_edit: bool,
+) -> Optional[OutboxEvent]:
+    """Build the v2 `recurring_change` event for one machine, or None to send nothing.
+
+    `before` is the `device_schedules` row as it stood (None for a create);
+    the `after_*` values describe what the write leaves behind (empty for a
+    delete). Returns None when no weekday moved and the vigencia was not cut
+    short. Special-day (recurring holiday) changes are not part of the v2 email.
+
+    Also None when the device cannot be resolved. `device_schedules.device_id`
     is a FK onto `devices`, so that should be unreachable; if it ever happens we
     would rather drop the notification than fail the schedule write, and the
     warning says so out loud.
     """
-    device = await device_crud.get_device_ref(pool, context["device_id"])
+    device = await device_crud.get_device_ref(pool, device_id)
     if device is None:
         logger.warning(
-            f"No device row for device_id={context['device_id']}; "
-            "skipping shift-change notification"
+            f"No device row for device_id={device_id}; skipping shift-change notification"
         )
         return None
 
-    return build_shift_change_event(
-        ShiftChangeContext(
-            action=context["action"],
-            device=device,
-            shift_type=context["shift_type"],
-            changed_at=datetime.now(timezone.utc),
-            before=context.get("before"),
-            after=context.get("after"),
-            actor=context.get("actor"),
-        )
+    before_days = snapshot_from_record(before).day_schedules if before else {}
+    before_extras = extras_from_jsonb(before["extra_hours"]) if before else {}
+    days = _diff_days(before_days, after_days, before_extras, after_extras)
+
+    validity_shortened = None
+    if is_edit and before is not None:
+        before_to = before.get("valid_to")
+        # an edit that closes or pulls in the end date; extending is not news
+        if valid_to is not None and (before_to is None or valid_to < before_to):
+            validity_shortened = {
+                "before_to": before_to.isoformat() if before_to else None,
+                "after_to": valid_to.isoformat(),
+            }
+
+    if not days and validity_shortened is None:
+        return None
+
+    rows = await exceptions_crud.exceptions_from(pool, [device_id], valid_from)
+    return build_recurring_change_event(
+        company_id=device.company_id,
+        operation_id=uuid4(),
+        changed_at=datetime.now(timezone.utc),
+        actor=actor,
+        valid_from=valid_from,
+        devices=[
+            {
+                "id": device.id,
+                "label": device.label,
+                "shift_type": shift_type,
+                "regular": None,
+                "result": None,
+                "replaced": None,
+                "days": days,
+                "validity_shortened": validity_shortened,
+            }
+        ],
+        skipped=[],
+        kept_exceptions=kept_exception_entries(device.label, rows, shift_type, valid_to),
     )
 
 
@@ -490,15 +539,17 @@ class ScheduleService:
 
         # A create auto-closes the previous open-ended schedule, so it moves the
         # device's effective hours just as an edit does — hence a notification.
-        event = await _shift_change_event(
+        event = await _recurring_change_event(
             pool,
-            {
-                "action": "created",
-                "device_id": device_id,
-                "shift_type": data.shift_type,
-                "after": snapshot_from_request(data),
-                "actor": actor,
-            },
+            device_id=device_id,
+            shift_type=data.shift_type,
+            before=None,
+            after_days=_days_from_request(data.schedule),
+            after_extras=_request_extras(data.extra_hours),
+            valid_from=data.valid_from,
+            valid_to=data.valid_to,
+            actor=actor,
+            is_edit=False,
         )
 
         if schedule_data["valid_to"] is not None:
@@ -582,17 +633,17 @@ class ScheduleService:
         if data.valid_to is not None:
             update_data["valid_to"] = data.valid_to
 
-        before = snapshot_from_record(existing)
-        event = await _shift_change_event(
+        event = await _recurring_change_event(
             pool,
-            {
-                "action": "updated",
-                "device_id": device_id,
-                "shift_type": effective_shift_type,
-                "before": before,
-                "after": snapshot_from_request(data, before),
-                "actor": actor,
-            },
+            device_id=device_id,
+            shift_type=effective_shift_type,
+            before=existing,
+            after_days=_days_from_request(data.schedule),
+            after_extras=_request_extras(data.extra_hours),
+            valid_from=data.valid_from or existing["valid_from"],
+            valid_to=data.valid_to or existing.get("valid_to"),
+            actor=actor,
+            is_edit=True,
         )
 
         await schedule_crud.partial_update(pool, schedule_id, update_data, event)
@@ -645,17 +696,26 @@ class ScheduleService:
                 update_data["source"] = data.metadata.source
 
         if update_data:
-            before = snapshot_from_record(existing)
-            event = await _shift_change_event(
+            # an omitted field keeps its current value
+            event = await _recurring_change_event(
                 pool,
-                {
-                    "action": "patched",
-                    "device_id": device_id,
-                    "shift_type": effective_shift_type,
-                    "before": before,
-                    "after": snapshot_from_request(data, before, merge=True),
-                    "actor": actor,
-                },
+                device_id=device_id,
+                shift_type=effective_shift_type,
+                before=existing,
+                after_days=(
+                    _days_from_request(data.schedule)
+                    if data.schedule is not None
+                    else snapshot_from_record(existing).day_schedules
+                ),
+                after_extras=(
+                    _request_extras(data.extra_hours)
+                    if data.extra_hours is not None
+                    else extras_from_jsonb(existing["extra_hours"])
+                ),
+                valid_from=data.valid_from or existing["valid_from"],
+                valid_to=data.valid_to or existing.get("valid_to"),
+                actor=actor,
+                is_edit=True,
             )
             await schedule_crud.partial_update(pool, schedule_id, update_data, event)
 
@@ -698,15 +758,17 @@ class ScheduleService:
         # The row's own device, not the path's: `scheduleId` can name any row.
         await _assert_not_mirrored(pool, existing["device_id"])
 
-        event = await _shift_change_event(
+        event = await _recurring_change_event(
             pool,
-            {
-                "action": "deleted",
-                "device_id": existing["device_id"],
-                "shift_type": existing.get("shift_type", shift_type),
-                "before": snapshot_from_record(existing),
-                "actor": actor,
-            },
+            device_id=existing["device_id"],
+            shift_type=existing.get("shift_type", shift_type),
+            before=existing,
+            after_days={},
+            after_extras={},
+            valid_from=existing["valid_from"],
+            valid_to=existing.get("valid_to"),
+            actor=actor,
+            is_edit=False,
         )
 
         if schedule_id:

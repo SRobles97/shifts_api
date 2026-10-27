@@ -34,7 +34,7 @@ class NotificationOutboxCRUD:
         that is to assume. `changed_at` is taken fresh per request and is part of
         the key, so a retried POST/PUT builds a different key and inserts a
         second row. What actually stops a retried PUT/PATCH from mailing twice is
-        upstream: `build_shift_change_event` returns None when the diff is empty,
+        upstream: `_recurring_change_event` returns None when the diff is empty,
         and a replay of a write that already landed has an empty diff. A replayed
         POST is a genuine second schedule (create auto-closes the previous one),
         so it notifies on purpose. Real cross-request idempotency would need a

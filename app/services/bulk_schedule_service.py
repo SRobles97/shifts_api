@@ -8,7 +8,6 @@ skipped. The preview raises a private sentinel to discard everything; the apply
 commits and enqueues a single v2 `recurring_change` event for the operation.
 """
 
-import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
@@ -22,8 +21,8 @@ from ..repositories.bulk_schedules import bulk_schedules_crud
 from ..repositories.exceptions import exceptions_crud
 from ..repositories.notification_outbox import notification_outbox_crud
 from ..schemas.day_changes import BulkDeviceResult, BulkScheduleRequest, BulkScheduleResponse
-from .day_change_service import describe_exception
-from .notification_events import _days_from_request, snapshot_from_record
+from .exception_summary import kept_exception_entries
+from .notification_events import _days_from_request, extras_from_jsonb, snapshot_from_record
 from .notification_events_v2 import Extras, _diff_days, build_recurring_change_event
 from .schedule_service import (
     _assert_day_shift_within_day,
@@ -50,16 +49,6 @@ def _extra_hours_json(req: BulkScheduleRequest) -> Optional[str]:
     if req.extra_hours is None:
         return None
     return _serialize_extra_hours(req.extra_hours) or "{}"
-
-
-def _extras(value: Any) -> Dict[str, Extras]:
-    """extra_hours jsonb (text or dict) as {weekday: [(start, end), ...]}."""
-    if isinstance(value, str):
-        value = json.loads(value)
-    return {
-        day: [(h.get("start"), h.get("end")) for h in (hours or [])]
-        for day, hours in (value or {}).items()
-    }
 
 
 async def _run(
@@ -106,7 +95,7 @@ async def _run(
         )
         before = outcome["before_row"]
         before_days = snapshot_from_record(before).day_schedules if before is not None else {}
-        before_extras = _extras(before["extra_hours"]) if before is not None else {}
+        before_extras = extras_from_jsonb(before["extra_hours"]) if before is not None else {}
         # omitted extraHours: the machine keeps (and carries) its own extras
         after_extras = before_extras if requested_extras is None else requested_extras
         applied.append(
@@ -125,20 +114,14 @@ async def _run(
         rows = await exceptions_crud.exceptions_from(
             conn, [r.device_id for r in applied], req.valid_from
         )
-        by_device = {r.device_id: r for r in applied}
-        for row in rows:
-            if row["shift_type"] != req.shift_type:
-                continue
-            result = by_device[row["device_id"]]
-            # past the new vigencia the exception sits on a later, untouched row
-            if result.new_valid_to is not None and row["date"] > result.new_valid_to:
-                continue
-            result.kept_exceptions.append(
-                {
-                    "device_label": result.label,
-                    "date": row["date"].isoformat(),
-                    "summary": describe_exception(row),
-                }
+        for result in applied:
+            result.kept_exceptions.extend(
+                kept_exception_entries(
+                    result.label,
+                    [r for r in rows if r["device_id"] == result.device_id],
+                    req.shift_type,
+                    result.new_valid_to,
+                )
             )
 
     return applied, skipped

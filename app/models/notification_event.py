@@ -12,12 +12,10 @@ able to reject a write the schedule layer would have accepted, so these models
 carry the values verbatim and validate nothing.
 """
 
-from datetime import date, datetime
-from typing import Any, Dict, List, Literal, Optional
+from datetime import date
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-
-ShiftChangeAction = Literal["created", "updated", "patched", "deleted"]
 
 NOTIFICATION_TYPE_SHIFT_CHANGE = "shift_change"
 
@@ -67,22 +65,6 @@ class ScheduleSnapshot(BaseModel):
     valid_from: Optional[date] = None
     valid_to: Optional[date] = None
     source: str = Field(default="ui", description="device_schedules.source")
-
-
-class ShiftChangeContext(BaseModel):
-    """Everything the payload builder needs, with no I/O of its own.
-
-    `changed_at` is injected rather than read from the clock so the builder
-    stays deterministic under test.
-    """
-
-    action: ShiftChangeAction
-    device: DeviceRef
-    shift_type: str
-    changed_at: datetime
-    before: Optional[ScheduleSnapshot] = None
-    after: Optional[ScheduleSnapshot] = None
-    actor: Optional[Actor] = None
 
 
 class OutboxEvent(BaseModel):

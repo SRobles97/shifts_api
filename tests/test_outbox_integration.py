@@ -21,9 +21,10 @@ regression test for it: it fails the run if the suite changed any row count it
 did not own.
 """
 
+import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -31,6 +32,8 @@ import pytest
 
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
 from app.repositories.crud import schedule_crud
+from app.repositories.exceptions import exceptions_crud
+from app.schemas.day_changes import ChangeSpec
 from app.services.schedule_service import MirroredScheduleError, ScheduleService
 from tests.integration_support import make_row_count_tripwire
 
@@ -106,6 +109,9 @@ async def clean(pool):
         async with pool.acquire() as conn:
             await conn.execute(
                 "DELETE FROM notification_outbox WHERE company_id = $1;", company_id
+            )
+            await conn.execute(
+                "DELETE FROM device_schedule_exceptions WHERE device_id = $1;", device_id
             )
             await conn.execute(
                 "DELETE FROM device_schedules WHERE device_id = $1;", device_id
@@ -224,13 +230,18 @@ class TestAtomicity:
         await ScheduleService.create_schedule(pool, create_data(clean["device_id"]))
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT type_key, company_id, status, payload FROM notification_outbox\n"
+                "SELECT type_key, company_id, status, payload, dedupe_key FROM notification_outbox\n"
                 "WHERE company_id = $1;",
                 clean["company_id"],
             )
         assert row["type_key"] == "shift_change"
         assert row["company_id"] == clean["company_id"]
         assert row["status"] == "pending"
+        payload = json.loads(row["payload"])
+        assert payload["version"] == 2
+        assert payload["operation"] == "recurring_change"
+        assert [d["id"] for d in payload["devices"]] == [clean["device_id"]]
+        assert row["dedupe_key"] == f"shift_change:{payload['operation_id']}"
 
     async def test_a_failing_event_rolls_the_schedule_back(self, pool, clean):
         """The guarantee that matters: no silent hour change without its notice."""
@@ -264,6 +275,33 @@ class TestAtomicity:
             ),
         )
         assert (await counts(pool, clean))["outbox"] == 2
+
+    async def test_update_event_lists_the_exceptions_it_keeps(self, pool, clean):
+        await ScheduleService.create_schedule(pool, create_data(clean["device_id"]))
+        day = datetime.now(timezone.utc).date() + timedelta(days=3)
+        async with pool.acquire() as conn, conn.transaction():
+            await exceptions_crud.upsert(
+                conn, clean["device_id"], "day", day, ChangeSpec(kind="no_work"), uuid.uuid4()
+            )
+        await ScheduleService.update_schedule(
+            pool,
+            clean["device_id"],
+            ScheduleUpdate.model_validate(
+                {"schedule": {"monday": {"workHours": {"start": "07:00", "end": "16:00"}}}}
+            ),
+        )
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT payload FROM notification_outbox WHERE company_id = $1;",
+                clean["company_id"],
+            )
+        payloads = [json.loads(r["payload"]) for r in rows]
+        [payload] = [
+            p for p in payloads if p["devices"][0]["days"][0]["change"] == "modified"
+        ]
+        assert payload["kept_exceptions"] == [
+            {"device_label": "Fresadora 1", "date": day.isoformat(), "summary": "Sin trabajo"}
+        ]
 
     async def test_delete_enqueues_and_removes_in_one_transaction(self, pool, clean):
         await ScheduleService.create_schedule(pool, create_data(clean["device_id"]))

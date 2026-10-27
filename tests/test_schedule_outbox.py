@@ -18,6 +18,7 @@ from tests.conftest import make_db_record, make_special_days_json
 
 CRUD_PATH = "app.services.schedule_service.schedule_crud"
 DEVICE_PATH = "app.services.schedule_service.device_crud.get_device_ref"
+EXC_PATH = "app.services.schedule_service.exceptions_crud.exceptions_from"
 
 
 def create_data(**overrides) -> ScheduleCreate:
@@ -60,28 +61,31 @@ async def run_update(data, existing, patch_mode=False):
 
 class TestCreateEnqueues:
     @pytest.mark.asyncio
-    async def test_create_enqueues_a_created_event(self):
+    async def test_create_enqueues_a_v2_recurring_change(self):
         event = await run_create(create_data())
         assert event is not None
         assert event.type_key == "shift_change"
         assert event.company_id == 3
-        assert event.payload["action"] == "created"
+        assert event.payload["version"] == 2
+        assert event.payload["operation"] == "recurring_change"
+        assert event.dedupe_key == f"shift_change:{event.payload['operation_id']}"
 
     @pytest.mark.asyncio
     async def test_created_event_describes_the_new_hours(self):
         event = await run_create(create_data())
-        assert event.payload["days"] == [
+        device = event.payload["devices"][0]
+        assert device["days"] == [
             {"day": "monday", "before": None, "after": "08:00–17:00", "change": "added"}
         ]
+        assert device["validity_shortened"] is None
         assert event.payload["valid_from"] == "2026-09-01"
 
     @pytest.mark.asyncio
-    async def test_bounded_create_goes_through_the_split_path_with_its_event(self):
+    async def test_bounded_create_goes_through_the_split_path_without_shortening(self):
         event = await run_create(
             create_data(validTo="2026-09-30"), method="create_with_split"
         )
-        assert event.payload["action"] == "created"
-        assert event.payload["valid_to"] == "2026-09-30"
+        assert event.payload["devices"][0]["validity_shortened"] is None
 
     @pytest.mark.asyncio
     async def test_event_routes_to_the_device_company_not_the_request(self):
@@ -97,17 +101,69 @@ class TestCreateEnqueues:
 # ==================== PUT / PATCH ====================
 
 
+def put_data(start="07:00", end="16:00", **overrides):
+    payload = {"schedule": {"monday": {"workHours": {"start": start, "end": end}}}}
+    payload.update(overrides)
+    return ScheduleUpdate.model_validate(payload)
+
+
 class TestUpdateEnqueues:
     @pytest.mark.asyncio
-    async def test_update_reports_the_moved_hours(self):
+    async def test_put_emits_v2_single_device(self):
         existing = make_db_record(days=["monday"])
-        data = ScheduleUpdate.model_validate(
-            {"schedule": {"monday": {"workHours": {"start": "07:00", "end": "16:00"}}}}
-        )
-        event = await run_update(data, existing)
-        assert event.payload["action"] == "updated"
-        assert event.payload["days"][0]["before"] == "08:00–17:00"
-        assert event.payload["days"][0]["after"] == "07:00–16:00"
+        event = await run_update(put_data(), existing)
+        payload = event.payload
+        assert payload["operation"] == "recurring_change"
+        assert payload["valid_from"] == "2025-01-01"
+        assert payload["skipped"] == []
+        assert payload["kept_exceptions"] == []
+        assert payload["devices"] == [
+            {
+                "id": 1,
+                "label": "Fresadora 1",
+                "shift_type": "day",
+                "regular": None,
+                "result": None,
+                "replaced": None,
+                "days": [
+                    {
+                        "day": "monday",
+                        "before": "08:00–17:00",
+                        "after": "07:00–16:00",
+                        "change": "modified",
+                        "breaks_before": "12:00 (60 min)",
+                        "breaks_after": "sin pausas",
+                    }
+                ],
+                "validity_shortened": None,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_put_shortening_validity_sets_validity_shortened(self):
+        existing = make_db_record(days=["monday"], valid_to=date(2026, 12, 31))
+        event = await run_update(put_data(validTo="2026-10-31"), existing)
+        assert event.payload["devices"][0]["validity_shortened"] == {
+            "before_to": "2026-12-31",
+            "after_to": "2026-10-31",
+        }
+
+    @pytest.mark.asyncio
+    async def test_closing_an_open_ended_schedule_counts_as_shortened(self):
+        existing = make_db_record(days=["monday"])
+        data = SchedulePatch.model_validate({"validTo": "2026-10-31"})
+        event = await run_update(data, existing, patch_mode=True)
+        assert event.payload["devices"][0]["validity_shortened"] == {
+            "before_to": None,
+            "after_to": "2026-10-31",
+        }
+        assert event.payload["devices"][0]["days"] == []
+
+    @pytest.mark.asyncio
+    async def test_extending_validity_is_not_news(self):
+        existing = make_db_record(days=["monday"], valid_to=date(2026, 10, 31))
+        data = SchedulePatch.model_validate({"validTo": "2026-12-31"})
+        assert await run_update(data, existing, patch_mode=True) is None
 
     @pytest.mark.asyncio
     async def test_patch_reports_the_moved_hours(self):
@@ -116,34 +172,52 @@ class TestUpdateEnqueues:
             {"schedule": {"monday": {"workHours": {"start": "09:00", "end": "18:00"}}}}
         )
         event = await run_update(data, existing, patch_mode=True)
-        assert event.payload["action"] == "patched"
-        assert event.payload["days"][0]["after"] == "09:00–18:00"
+        assert event.payload["operation"] == "recurring_change"
+        assert event.payload["devices"][0]["days"][0]["after"] == "09:00–18:00"
 
     @pytest.mark.asyncio
-    async def test_metadata_only_patch_enqueues_nothing(self):
+    async def test_patch_that_changes_only_extra_hours_notifies(self):
+        existing = make_db_record(days=["monday"])
+        data = SchedulePatch.model_validate(
+            {"extraHours": {"monday": [{"start": "17:00", "end": "19:00"}]}}
+        )
+        event = await run_update(data, existing, patch_mode=True)
+        assert event.payload["devices"][0]["days"][0]["after"] == "08:00–17:00 + 17:00–19:00"
+
+    @pytest.mark.asyncio
+    async def test_patch_without_changes_emits_nothing(self):
         existing = make_db_record(days=["monday"])
         data = SchedulePatch.model_validate({"metadata": {"version": "2.0", "source": "api"}})
         assert await run_update(data, existing, patch_mode=True) is None
 
     @pytest.mark.asyncio
-    async def test_patch_that_only_moves_validity_still_notifies(self):
+    async def test_patch_that_only_moves_valid_from_emits_nothing(self):
         existing = make_db_record(days=["monday"], valid_from=date(2026, 9, 1))
         data = SchedulePatch.model_validate({"validFrom": "2026-10-01"})
-        event = await run_update(data, existing, patch_mode=True)
-        assert event.payload["validity_changed"] is True
+        assert await run_update(data, existing, patch_mode=True) is None
 
     @pytest.mark.asyncio
-    async def test_patch_adding_a_special_day_notifies(self):
+    async def test_special_days_only_change_is_not_emailed(self):
         existing = make_db_record(days=["monday"])
         data = SchedulePatch.model_validate(
-            {
-                "specialDays": {
-                    "2026-12-25": {"name": "Navidad", "type": "holiday"}
-                }
-            }
+            {"specialDays": {"2026-12-25": {"name": "Navidad", "type": "holiday"}}}
         )
-        event = await run_update(data, existing, patch_mode=True)
-        assert event.payload["special_days_changed"] == 1
+        assert await run_update(data, existing, patch_mode=True) is None
+
+    @pytest.mark.asyncio
+    async def test_kept_exceptions_from_valid_from_are_listed_for_the_same_shift(self):
+        existing = make_db_record(days=["monday"], valid_to=date(2026, 12, 31))
+        rows = [
+            {"date": date(2026, 10, 5), "shift_type": "day", "kind": "no_work"},
+            {"date": date(2026, 10, 6), "shift_type": "night", "kind": "no_work"},
+            {"date": date(2027, 1, 4), "shift_type": "day", "kind": "no_work"},
+        ]
+        with patch(EXC_PATH, new_callable=AsyncMock, return_value=rows) as exc:
+            event = await run_update(put_data(), existing)
+        assert exc.call_args.args[1:] == ([1], date(2025, 1, 1))
+        assert event.payload["kept_exceptions"] == [
+            {"device_label": "Fresadora 1", "date": "2026-10-05", "summary": "Sin trabajo"}
+        ]
 
 
 # ==================== DELETE ====================
@@ -151,16 +225,19 @@ class TestUpdateEnqueues:
 
 class TestDeleteEnqueues:
     @pytest.mark.asyncio
-    async def test_delete_reports_the_hours_that_disappeared(self):
+    async def test_delete_emits_v2(self):
         pool = AsyncMock()
         existing = make_db_record(days=["monday", "tuesday"])
         with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
              patch(f"{CRUD_PATH}.delete_current_by_device_id", new_callable=AsyncMock, return_value=True) as crud:
             await ScheduleService.delete_schedule(pool, 1)
         event = crud.call_args.args[3]
-        assert event.payload["action"] == "deleted"
-        assert [d["change"] for d in event.payload["days"]] == ["removed", "removed"]
-        assert event.payload["days"][0]["before"] == "08:00–17:00"
+        assert event.payload["operation"] == "recurring_change"
+        assert event.payload["valid_from"] == "2025-01-01"
+        days = event.payload["devices"][0]["days"]
+        assert [d["change"] for d in days] == ["removed", "removed"]
+        assert days[0]["before"] == "08:00–17:00"
+        assert event.payload["devices"][0]["validity_shortened"] is None
 
     @pytest.mark.asyncio
     async def test_delete_by_id_carries_its_event(self):
@@ -169,7 +246,7 @@ class TestDeleteEnqueues:
         with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=existing), \
              patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True) as crud:
             await ScheduleService.delete_schedule(pool, 1, schedule_id=42)
-        assert crud.call_args.args[2].payload["action"] == "deleted"
+        assert crud.call_args.args[2].payload["operation"] == "recurring_change"
 
 
 # ==================== Out of scope for this phase ====================

@@ -28,13 +28,12 @@ from ..schemas.day_changes import (
     DayChangeResponse,
     ExceptionRead,
 )
+from .exception_summary import NO_WORK_LABEL, describe_exception
 from .notification_events_v2 import build_day_change_event
 from .schedule_service import _MIRRORED_MESSAGE, MirroredScheduleError
 
 DEFAULT_TZ = "America/Santiago"
-NO_WORK_LABEL = "Sin trabajo"
 _DASH = "–"
-_POSITION_LABELS = {"after": "después", "before": "antes"}
 MAX_LIST_RANGE_DAYS = 400
 
 
@@ -69,30 +68,6 @@ def format_blocks(rows: Iterable[Mapping[str, Any]], tz_name: str) -> Optional[s
         out += f"{_hhmm(r['block_start'], tz)}{_DASH}{_hhmm(r['block_end'], tz)}"
         prev_kind = r["kind"]
     return out or None
-
-
-def describe_exception(row: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """Short Spanish summary of a per-date exception, for "replaced"."""
-    if row is None:
-        return None
-    kind = row["kind"]
-    if kind == "extra_hours":
-        minutes = row["extra_minutes"] or 0
-        position = _POSITION_LABELS.get(row["extra_position"], row["extra_position"] or "")
-        if minutes % 60 == 0:
-            hours = minutes // 60
-            return f"+{hours} h {'extra' if hours == 1 else 'extras'} {position}"
-        return f"+{minutes} min extra {position}"
-    if kind == "custom_hours":
-        hours = row["work_hours"]
-        if isinstance(hours, str):
-            hours = json.loads(hours)
-        if not hours:
-            return None
-        return f"{hours.get('start')}{_DASH}{hours.get('end')}"
-    if kind == "no_work":
-        return NO_WORK_LABEL
-    return kind
 
 
 def _of_shift(rows, device_id: int, shift_type: str, day: date) -> List[Mapping[str, Any]]:
