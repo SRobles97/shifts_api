@@ -503,3 +503,27 @@ async def test_bulk_kept_exceptions_stop_at_new_valid_to(pool, env):
     ]
     [row] = await _outbox(pool, env["company_id"])
     assert [e["date"] for e in json.loads(row["payload"])["kept_exceptions"]] == ["2026-11-30"]
+
+
+async def test_bulk_backdated_kept_exceptions_start_today(pool, env):
+    from unittest.mock import patch
+
+    d1 = env["d1"]
+    await _schedule(pool, d1)
+    op = uuid.uuid4()
+    async with pool.acquire() as conn:
+        no_work = ChangeSpec(kind="no_work")
+        # after valid_from but already past: not kept over anything
+        await exceptions_crud.upsert(conn, d1, "day", date(2026, 10, 20), no_work, op)
+        await exceptions_crud.upsert(conn, d1, "day", date(2026, 10, 29), no_work, op)
+
+    # the same seam the single-schedule writers use
+    with patch("app.services.schedule_service._today_santiago", return_value=date(2026, 10, 27)):
+        resp = await apply_bulk(pool, _req([d1], valid_from=date(2026, 10, 1)), env["refs"], ACTOR)
+
+    [result] = resp.applied
+    assert result.kept_exceptions == [
+        {"device_label": "Fresadora 1", "date": "2026-10-29", "summary": "Sin trabajo"}
+    ]
+    [row] = await _outbox(pool, env["company_id"])
+    assert [e["date"] for e in json.loads(row["payload"])["kept_exceptions"]] == ["2026-10-29"]

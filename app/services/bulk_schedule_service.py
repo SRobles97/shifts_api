@@ -24,6 +24,7 @@ from ..schemas.day_changes import BulkDeviceResult, BulkScheduleRequest, BulkSch
 from .exception_summary import kept_exception_entries
 from .notification_events import _days_from_request, extras_from_jsonb, snapshot_from_record
 from .notification_events_v2 import Extras, _diff_days, build_recurring_change_event
+from . import schedule_service as schedule_module
 from .schedule_service import (
     _assert_day_shift_within_day,
     _serialize_day_schedules,
@@ -110,9 +111,12 @@ async def _run(
 
     if applied:
         # Per-date exceptions of this shift inside each new vigencia stay in
-        # force over the new schedule.
+        # force over the new schedule. Past ones are not "kept" over anything:
+        # list from today on (schedule_service's clock seam).
         rows = await exceptions_crud.exceptions_from(
-            conn, [r.device_id for r in applied], req.valid_from
+            conn,
+            [r.device_id for r in applied],
+            max(req.valid_from, schedule_module._today_santiago()),
         )
         for result in applied:
             result.kept_exceptions.extend(
