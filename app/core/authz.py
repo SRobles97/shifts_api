@@ -14,8 +14,9 @@ import httpx
 from fastapi import Header, HTTPException
 from loguru import logger
 
-from ..models.notification_event import Actor
+from ..models.notification_event import Actor, DeviceRef
 from ..repositories.devices import device_crud
+from ..repositories.exceptions import exceptions_crud
 from .actor import _bearer
 from .config import settings
 
@@ -97,16 +98,39 @@ async def require_schedule_editor(
     )
 
 
-async def assert_can_edit_device(pool, editor: Editor, device_id: int) -> None:
-    """Raise 404/403 unless `editor` may change schedules of this device."""
-    ref = await device_crud.get_device_ref(pool, device_id)
-    if ref is None:
-        raise HTTPException(status_code=404, detail=f"Dispositivo {device_id} no encontrado")
+def _assert_role_in_company(editor: Editor, company_id: int) -> None:
+    """Raise 403 unless `editor` may change schedules of this company."""
     if editor.is_superuser:
         return
-    level = ROLE_LEVELS.get(editor.company_roles.get(ref.company_id, ""), 0)
+    level = ROLE_LEVELS.get(editor.company_roles.get(company_id, ""), 0)
     if level < SCHEDULE_EDIT_LEVEL:
         raise HTTPException(
             status_code=403,
             detail="Su rol no permite modificar turnos en esta compañía",
         )
+
+
+async def assert_can_edit_device(pool, editor: Editor, device_id: int) -> None:
+    """Raise 404/403 unless `editor` may change schedules of this device."""
+    ref = await device_crud.get_device_ref(pool, device_id)
+    if ref is None:
+        raise HTTPException(status_code=404, detail=f"Dispositivo {device_id} no encontrado")
+    _assert_role_in_company(editor, ref.company_id)
+
+
+async def assert_can_edit_devices(
+    pool, editor: Editor, device_ids: list[int]
+) -> dict[int, DeviceRef]:
+    """Raise 404/400/403 unless `editor` may change every device, all of one company."""
+    refs = await exceptions_crud.device_refs(pool, device_ids)
+    for device_id in device_ids:
+        if device_id not in refs:
+            raise HTTPException(status_code=404, detail=f"Dispositivo {device_id} no encontrado")
+    companies = {ref.company_id for ref in refs.values()}
+    if len(companies) > 1:
+        raise HTTPException(
+            status_code=400, detail="Todas las máquinas deben ser de la misma empresa"
+        )
+    for company_id in companies:
+        _assert_role_in_company(editor, company_id)
+    return refs

@@ -202,3 +202,63 @@ async def test_actor_still_reaches_service(real_client, update_payload):
     ) as svc:
         await real_client.put("/schedules/7", headers=TOKEN, json=update_payload)
     assert svc.await_args.kwargs["actor"].email == "m@x.cl"
+
+
+# --- batch authorisation -------------------------------------------------
+
+
+def _refs(**company_by_id):
+    return {
+        int(k[1:]): DeviceRef(id=int(k[1:]), company_id=c, key=k[1:], display_name="")
+        for k, c in company_by_id.items()
+    }
+
+
+def _editor(*roles, superuser=False):
+    return authz_module.Editor(
+        email="m@x.cl", name="Mia", is_superuser=superuser, company_roles=dict(roles)
+    )
+
+
+async def _batch(refs, editor, ids):
+    with patch.object(
+        authz_module.exceptions_crud, "device_refs", AsyncMock(return_value=refs)
+    ):
+        return await authz_module.assert_can_edit_devices(object(), editor, ids)
+
+
+async def test_mixed_companies_rejected():
+    with pytest.raises(authz_module.HTTPException) as e:
+        await _batch(_refs(d1=2, d2=3), _editor((2, "MANAGER"), (3, "MANAGER")), [1, 2])
+    assert e.value.status_code == 400
+    assert e.value.detail == "Todas las máquinas deben ser de la misma empresa"
+
+
+async def test_manager_of_other_company_forbidden():
+    with pytest.raises(authz_module.HTTPException) as e:
+        await _batch(_refs(d1=2, d2=2), _editor((9, "MANAGER"), (2, "ANALYST")), [1, 2])
+    assert e.value.status_code == 403
+    assert e.value.detail == "Su rol no permite modificar turnos en esta compañía"
+
+
+async def test_unknown_device_404_first_missing_in_request_order():
+    with pytest.raises(authz_module.HTTPException) as e:
+        await _batch(_refs(d1=2), _editor((2, "MANAGER")), [1, 8, 5])
+    assert e.value.status_code == 404
+    assert e.value.detail == "Dispositivo 8 no encontrado"
+
+
+async def test_unknown_device_404_beats_mixed_companies():
+    with pytest.raises(authz_module.HTTPException) as e:
+        await _batch(_refs(d1=2, d2=3), _editor(superuser=True), [1, 2, 99])
+    assert e.value.status_code == 404
+
+
+async def test_superuser_any_company_same_company_ok():
+    refs = _refs(d1=5, d2=5)
+    assert await _batch(refs, _editor(superuser=True), [1, 2]) == refs
+
+
+async def test_returns_refs():
+    refs = _refs(d1=2, d2=2)
+    assert await _batch(refs, _editor((2, "MANAGER")), [1, 2]) == refs
