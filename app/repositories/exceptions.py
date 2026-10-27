@@ -44,6 +44,19 @@ class ExceptionsCRUD:
         }
 
     @staticmethod
+    async def timezones(pool_or_conn, device_ids: List[int]) -> Dict[int, str]:
+        """IANA zone per device, the one the schedule functions resolve times in."""
+        rows = await pool_or_conn.fetch(
+            """
+            SELECT id, COALESCE(timezone, 'America/Santiago') AS tz
+            FROM devices
+            WHERE id = ANY($1::bigint[]);
+            """,
+            device_ids,
+        )
+        return {r["id"]: r["tz"] for r in rows}
+
+    @staticmethod
     async def mirrored_ids(pool_or_conn, device_ids: List[int]) -> Set[int]:
         """Devices that have at least one schedule row mirrored from a pilot."""
         rows = await pool_or_conn.fetch(

@@ -10,8 +10,14 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 
-from ..core.authz import Editor, assert_can_edit_device, require_schedule_editor
+from ..core.authz import (
+    Editor,
+    assert_can_edit_device,
+    assert_can_edit_devices,
+    require_schedule_editor,
+)
 from ..core.dependencies import get_db_pool, verify_api_key
+from ..schemas.day_changes import DayChangeRequest, DayChangeResponse
 from ..schemas.schedule import (
     AllScheduleStatsResponse,
     DayScheduleSchema,
@@ -23,6 +29,7 @@ from ..schemas.schedule import (
     SingleScheduleStatsResponse,
     SpecialDaySchema,
 )
+from ..services import day_change_service
 from ..services.schedule_service import MirroredScheduleError, schedule_service
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -127,6 +134,48 @@ async def create_schedule(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al crear el horario: {e}")
+
+
+# ========== Day Changes ("Cambiar un día") ==========
+# Static paths: declared before the /{device_id} routes.
+
+
+@router.post("/day-changes/preview", response_model=DayChangeResponse, responses=RESPONSES_404_400_500)
+async def preview_day_change(
+    data: DayChangeRequest,
+    pool: Pool,
+    _: ApiKey,
+    editor: ScheduleEditor,
+):
+    """Preview a per-date change over several machines; nothing is written."""
+    refs = await assert_can_edit_devices(pool, editor, data.device_ids)
+    try:
+        return await day_change_service.preview_day_change(pool, data, refs)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al previsualizar el cambio del día: {e}")
+
+
+@router.post("/day-changes", response_model=DayChangeResponse, responses=RESPONSES_404_400_500)
+async def apply_day_change(
+    data: DayChangeRequest,
+    pool: Pool,
+    _: ApiKey,
+    editor: ScheduleEditor,
+):
+    """Apply a per-date change to several machines at once (one email)."""
+    refs = await assert_can_edit_devices(pool, editor, data.device_ids)
+    try:
+        return await day_change_service.apply_day_change(pool, data, refs, editor.actor())
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al aplicar el cambio del día: {e}")
 
 
 @router.put("/{device_id}", response_model=ScheduleRead, responses=RESPONSES_404_400_500)
