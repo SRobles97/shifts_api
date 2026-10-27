@@ -177,3 +177,17 @@ def test_diff_days_without_extras_ignores_them():
 
     day = {"monday": DayHours(start="08:00", end="17:00")}
     assert _diff_days(day, day) == []
+
+
+def test_diff_days_extras_only_day_in_clock_order():
+    from app.services.notification_events_v2 import _diff_days
+
+    days = _diff_days({}, {}, {}, {"saturday": [("17:00", "19:00"), ("06:00", "08:00")]})
+    assert days == [
+        {
+            "day": "saturday",
+            "before": None,
+            "after": "06:00–08:00 + 17:00–19:00",
+            "change": "added",
+        }
+    ]

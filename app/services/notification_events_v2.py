@@ -59,10 +59,15 @@ def _format_hours(day: Optional[DayHours], extras: Extras = ()) -> Optional[str]
     pieces += list(extras)
     if not pieces:
         return None
-    anchor = _clock(day.start) if day else 0
+    if day is None:
+        # no shift to anchor on: plain clock order
+        def offset(piece: Tuple[str, str]) -> int:
+            return _clock(piece[0])
+    else:
+        anchor = _clock(day.start)
 
-    def offset(piece: Tuple[str, str]) -> int:
-        return (_clock(piece[0]) - anchor + _BEFORE_WINDOW) % _DAY_MINUTES
+        def offset(piece: Tuple[str, str]) -> int:
+            return (_clock(piece[0]) - anchor + _BEFORE_WINDOW) % _DAY_MINUTES
 
     return " + ".join(f"{a}{_HOURS_SEPARATOR}{b}" for a, b in sorted(pieces, key=offset))
 

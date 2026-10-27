@@ -481,3 +481,25 @@ async def test_bulk_omitted_extra_hours_is_not_a_change(pool, env):
     assert resp.applied[0].days == []
     # carried extras, nothing to tell: no email
     assert await _outbox(pool, env["company_id"]) == []
+
+
+async def test_bulk_kept_exceptions_stop_at_new_valid_to(pool, env):
+    d1 = env["d1"]
+    # case (b): nothing covers valid_from, a vigencia starts on 2026-12-01
+    await _schedule(pool, d1, valid_from=date(2026, 12, 1))
+    op = uuid.uuid4()
+    async with pool.acquire() as conn:
+        no_work = ChangeSpec(kind="no_work")
+        await exceptions_crud.upsert(conn, d1, "day", date(2026, 11, 30), no_work, op)
+        # inside the later, untouched vigencia: not kept over the new schedule
+        await exceptions_crud.upsert(conn, d1, "day", date(2026, 12, 4), no_work, op)
+
+    resp = await apply_bulk(pool, _req([d1]), env["refs"], ACTOR)
+
+    [result] = resp.applied
+    assert result.new_vigencia_kind == "future_bounded"
+    assert result.kept_exceptions == [
+        {"device_label": "Fresadora 1", "date": "2026-11-30", "summary": "Sin trabajo"}
+    ]
+    [row] = await _outbox(pool, env["company_id"])
+    assert [e["date"] for e in json.loads(row["payload"])["kept_exceptions"]] == ["2026-11-30"]

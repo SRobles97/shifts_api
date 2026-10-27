@@ -120,7 +120,8 @@ async def _run(
         )
 
     if applied:
-        # Per-date exceptions of this shift stay in force over the new schedule.
+        # Per-date exceptions of this shift inside each new vigencia stay in
+        # force over the new schedule.
         rows = await exceptions_crud.exceptions_from(
             conn, [r.device_id for r in applied], req.valid_from
         )
@@ -129,6 +130,9 @@ async def _run(
             if row["shift_type"] != req.shift_type:
                 continue
             result = by_device[row["device_id"]]
+            # past the new vigencia the exception sits on a later, untouched row
+            if result.new_valid_to is not None and row["date"] > result.new_valid_to:
+                continue
             result.kept_exceptions.append(
                 {
                     "device_label": result.label,
