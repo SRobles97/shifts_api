@@ -141,10 +141,12 @@ async def _run(
         try:
             if current is not None:
                 await exceptions_crud.delete(conn, current["id"])
+                if current["source"] == "migrated":
+                    # before the baseline, or regular would still show the
+                    # migrated day through the jsonb fallback
+                    await exceptions_crud.strip_jsonb_key(conn, device_id, day)
             baseline = await exceptions_crud.blocks(conn, [device_id], day, window_end)
             await exceptions_crud.upsert(conn, device_id, shift_type, day, change, operation_id)
-            if current is not None and current["source"] == "migrated":
-                await exceptions_crud.strip_jsonb_key(conn, device_id, day)
             after = await exceptions_crud.blocks(conn, [device_id], day, window_end)
             days = await exceptions_crud.days(conn, [device_id], day, day)
 

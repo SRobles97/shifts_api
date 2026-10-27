@@ -350,6 +350,8 @@ async def test_replacing_migrated_strips_jsonb_key(pool, env):
 
     [res] = resp.applied
     assert res.replaced == "Sin trabajo"
+    # the jsonb key goes before the baseline is read: regular is the weekday
+    assert res.regular == "08:00–17:00"
     keys = await pool.fetchval(
         "SELECT special_days FROM device_schedules WHERE device_id = $1;", d1
     )
