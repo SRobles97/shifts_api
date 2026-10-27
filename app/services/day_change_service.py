@@ -46,22 +46,21 @@ def _hhmm(moment: datetime, tz: ZoneInfo) -> str:
 def format_blocks(rows: Iterable[Mapping[str, Any]], tz_name: str) -> Optional[str]:
     """Blocks as "HH:MM–HH:MM" in the machine's zone; None when there are none.
 
-    Regular pieces are joined with " / " and extras appended with " + ", each
-    group in start order.
+    All blocks in start order. Two consecutive regular pieces are separated by
+    " / "; any boundary touching an extra uses " + ". So a day with a break and
+    an extra after reads "08:00–12:00 / 13:00–17:00 + 17:00–19:00", and an extra
+    before reads "04:30–06:30 + 06:30–15:00".
     """
     tz = ZoneInfo(tz_name)
-    rows = sorted(rows, key=lambda r: r["block_start"])
-    regular = [r for r in rows if r["kind"] == "regular"]
-    extras = [r for r in rows if r["kind"] != "regular"]
-
-    def spans(group):
-        return [f"{_hhmm(r['block_start'], tz)}{_DASH}{_hhmm(r['block_end'], tz)}" for r in group]
-
-    parts = []
-    if regular:
-        parts.append(" / ".join(spans(regular)))
-    parts.extend(spans(extras))
-    return " + ".join(parts) if parts else None
+    out = ""
+    prev_kind = None
+    for r in sorted(rows, key=lambda r: (r["block_start"], r["block_end"])):
+        if prev_kind is not None:
+            both_regular = prev_kind == "regular" and r["kind"] == "regular"
+            out += " / " if both_regular else " + "
+        out += f"{_hhmm(r['block_start'], tz)}{_DASH}{_hhmm(r['block_end'], tz)}"
+        prev_kind = r["kind"]
+    return out or None
 
 
 def describe_exception(row: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -102,6 +101,10 @@ def _extra_minutes(rows) -> float:
         for r in rows
         if r["kind"] == "extra"
     )
+
+
+def _minutes(rows) -> float:
+    return sum((r["block_end"] - r["block_start"]).total_seconds() / 60 for r in rows)
 
 
 def _overlaps(a, b) -> bool:
@@ -166,22 +169,27 @@ async def _run(
             after_shift = _of_shift(after, device_id, shift_type, day)
             base.regular = format_blocks(base_shift, tz)
 
+            base_others = [r for r in baseline if r["shift_type"] != shift_type]
+            after_others = [r for r in after if r["shift_type"] != shift_type]
+
             reason = None
-            if change.kind == "extra_hours":
-                orphan = any(
-                    r["orphan_extra"]
-                    for r in days
-                    if r["shift_type"] == shift_type and r["shift_date"] == day
-                )
-                if orphan:
-                    reason = "no_shift_that_day"
-                elif _extra_minutes(after_shift) - _extra_minutes(base_shift) < change.minutes:
+            if change.kind == "extra_hours" and any(
+                r["orphan_extra"]
+                for r in days
+                if r["shift_type"] == shift_type and r["shift_date"] == day
+            ):
+                reason = "no_shift_that_day"
+            elif _minutes(after_others) < _minutes(base_others):
+                # the change took time from another shift: the SQL function
+                # clips every extra against all regulars and earlier extras
+                reason = "overlaps_other_shift"
+            elif change.kind == "extra_hours":
+                if _extra_minutes(after_shift) - _extra_minutes(base_shift) < change.minutes:
                     # the SQL function clipped the extra against another shift
                     reason = "overlaps_other_shift"
             elif change.kind == "custom_hours":
-                others = [r for r in after if r["shift_type"] != shift_type]
                 new_regular = [r for r in after_shift if r["kind"] == "regular"]
-                if any(_overlaps(n, o) for n in new_regular for o in others):
+                if any(_overlaps(n, o) for n in new_regular for o in base_others):
                     reason = "overlaps_other_shift"
         except BaseException:
             await savepoint.rollback()

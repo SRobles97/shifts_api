@@ -81,6 +81,30 @@ def test_format_regular_pieces_joined_with_slash():
     assert format_blocks(rows, TZ) == "08:00–12:00 / 13:00–17:00"
 
 
+def test_format_extra_before_is_chronological():
+    rows = [_block(_utc(6, 30), _utc(15)), _block(_utc(4, 30), _utc(6, 30), kind="extra")]
+    assert format_blocks(rows, TZ) == "04:30–06:30 + 06:30–15:00"
+
+
+def test_format_mixed_separators_in_start_order():
+    rows = [
+        _block(_utc(13), _utc(17)),
+        _block(_utc(17), _utc(19), kind="extra"),
+        _block(_utc(6), _utc(8), kind="extra"),
+        _block(_utc(8), _utc(12)),
+    ]
+    assert format_blocks(rows, TZ) == "06:00–08:00 + 08:00–12:00 / 13:00–17:00 + 17:00–19:00"
+
+
+def test_format_consecutive_extras_use_plus():
+    rows = [
+        _block(_utc(8), _utc(17)),
+        _block(_utc(17), _utc(18), kind="extra"),
+        _block(_utc(19), _utc(20), kind="extra"),
+    ]
+    assert format_blocks(rows, TZ) == "08:00–17:00 + 17:00–18:00 + 19:00–20:00"
+
+
 def test_format_empty_is_none():
     assert format_blocks([], TZ) is None
 

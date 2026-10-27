@@ -9,11 +9,13 @@ import json
 import os
 import uuid
 from datetime import date
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import pytest
 
 from app.models.notification_event import Actor, DeviceRef
+from app.repositories.exceptions import exceptions_crud
 from app.schemas.day_changes import DayChangeRequest
 from app.services.day_change_service import apply_day_change, preview_day_change
 from tests.integration_support import make_row_count_tripwire
@@ -100,18 +102,21 @@ async def env(pool):
             await conn.execute("DELETE FROM companies WHERE id = $1;", company_id)
 
 
-async def _schedule(pool, device_id, days, shift_type="day", source="ui", special_days=None):
+async def _schedule(
+    pool, device_id, days, shift_type="day", source="ui", special_days=None, extra_hours=None
+):
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO device_schedules
-                (device_id, shift_type, day_schedules, special_days, valid_from, source)
-            VALUES ($1, $2, $3::jsonb, $4::jsonb, '2026-01-01', $5);
+                (device_id, shift_type, day_schedules, special_days, extra_hours, valid_from, source)
+            VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, '2026-01-01', $6);
             """,
             device_id,
             shift_type,
             json.dumps({d: {"workHours": {"start": s, "end": e}} for d, (s, e) in days.items()}),
             json.dumps(special_days) if special_days is not None else None,
+            json.dumps(extra_hours) if extra_hours is not None else None,
             source,
         )
 
@@ -218,6 +223,64 @@ async def test_custom_hours_overlapping_night_shift_is_skipped(pool, env):
     assert await _exceptions(pool, d1) == []
 
 
+async def _night_with_recurring_extra(pool, device_id, night_end, extra):
+    """Thursday night shift whose recurring extra lands on Friday morning.
+
+    Recurring extras count from schedule_settings.recurring_extras_from, which
+    is 2026-10-22 on the local DB; the precondition below proves the extra is
+    in force on FRIDAY instead of relying on that silently.
+    """
+    await _schedule(
+        pool, device_id, {"thursday": ("22:00", night_end)}, shift_type="night",
+        extra_hours={"thursday": [{"start": extra[0], "end": extra[1]}]},
+    )
+    tz = ZoneInfo("America/Santiago")
+    rows = await exceptions_crud.blocks(pool, [device_id], FRIDAY, FRIDAY)
+    night_extras = [
+        (r["block_start"].astimezone(tz).strftime("%H:%M"), r["block_end"].astimezone(tz).strftime("%H:%M"))
+        for r in rows
+        if r["shift_type"] == "night" and r["kind"] == "extra"
+    ]
+    assert night_extras == [extra], "recurring extras are not in force on the test date"
+
+
+async def test_custom_hours_erasing_night_recurring_extra_is_skipped(pool, env):
+    d1 = env["d1"]
+    await _night_with_recurring_extra(pool, d1, "06:00", ("06:00", "07:00"))
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")}, shift_type="day")
+    # 06:00–12:00 touches no night regular block but would erase its 06:00–07:00 extra
+    change = {"kind": "custom_hours", "workHours": {"start": "06:00", "end": "12:00"}}
+
+    resp = await apply_day_change(pool, _req([d1], change), env["refs"], ACTOR)
+
+    assert [(r.device_id, r.skipped) for r in resp.skipped] == [(d1, "overlaps_other_shift")]
+    assert await _exceptions(pool, d1) == []
+    assert await _outbox(pool, env["company_id"]) == []
+
+
+async def test_extra_before_taking_night_recurring_extra_is_skipped(pool, env):
+    d1 = env["d1"]
+    await _night_with_recurring_extra(pool, d1, "05:00", ("05:30", "06:30"))
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")}, shift_type="day")
+    # 05:00–08:00 keeps its full 180 min (it starts first) and takes the night extra
+    change = {"kind": "extra_hours", "minutes": 180, "position": "before"}
+
+    resp = await apply_day_change(pool, _req([d1], change), env["refs"], ACTOR)
+
+    assert [(r.device_id, r.skipped) for r in resp.skipped] == [(d1, "overlaps_other_shift")]
+    assert await _exceptions(pool, d1) == []
+
+
+async def test_extra_before_reads_chronologically(pool, env):
+    d1 = env["d1"]
+    await _schedule(pool, d1, {"friday": ("06:30", "15:00")})
+    change = {"kind": "extra_hours", "minutes": 120, "position": "before"}
+
+    resp = await apply_day_change(pool, _req([d1], change), env["refs"], ACTOR)
+
+    assert resp.applied[0].result == "04:30–06:30 + 06:30–15:00"
+
+
 async def test_pilot_is_skipped_not_error(pool, env):
     d1, d2 = env["d1"], env["d2"]
     await _schedule(pool, d1, {"friday": ("08:00", "17:00")})
@@ -320,6 +383,33 @@ async def test_preview_matches_apply_and_leaves_no_rows(pool, env):
     assert preview.skipped == applied.skipped
     assert [r.device_id for r in preview.applied] == [d1]
     assert [(r.device_id, r.skipped) for r in preview.skipped] == [(d2, "no_shift_that_day")]
+
+
+async def test_preview_replacing_migrated_keeps_jsonb_key(pool, env):
+    d1 = env["d1"]
+    special = {FRIDAY.isoformat(): {"name": "Sin trabajo", "type": "holiday", "workHours": None}}
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")}, special_days=special)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO device_schedule_exceptions
+                (device_id, shift_type, date, kind, operation_id, source)
+            VALUES ($1, 'day', $2, 'no_work', $3, 'migrated');
+            """,
+            d1,
+            FRIDAY,
+            uuid.uuid4(),
+        )
+
+    preview = await preview_day_change(pool, _req([d1], EXTRA_AFTER), env["refs"])
+
+    assert preview.applied[0].replaced == "Sin trabajo"
+    keys = await pool.fetchval(
+        "SELECT special_days FROM device_schedules WHERE device_id = $1;", d1
+    )
+    assert set(json.loads(keys)) == {FRIDAY.isoformat()}
+    [row] = await _exceptions(pool, d1)
+    assert row["source"] == "migrated" and row["kind"] == "no_work"
 
 
 async def test_all_skipped_writes_nothing(pool, env):
