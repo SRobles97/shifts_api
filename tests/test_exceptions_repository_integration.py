@@ -236,3 +236,26 @@ async def test_upsert_extra_hours_then_no_work_resets_extra_fields(pool, env):
     assert len(rows) == 1
     assert rows[0]["kind"] == "no_work"
     assert rows[0]["extra_minutes"] is None and rows[0]["extra_position"] is None
+
+
+async def test_strip_jsonb_key_keeps_recurring_entry(pool, env):
+    d1 = env["d1"]
+    special = json.dumps({
+        DAY.isoformat(): {"workHours": None, "isRecurring": True, "recurrencePattern": "yearly"},
+    })
+    async with pool.acquire() as conn:
+        for shift in ("day", "night"):
+            await conn.execute(
+                """
+                INSERT INTO device_schedules (device_id, shift_type, day_schedules, special_days, valid_from)
+                VALUES ($1, $2, '{}'::jsonb, $3::jsonb, '2031-01-01');
+                """,
+                d1,
+                shift,
+                special,
+            )
+        async with conn.transaction():
+            touched = await exceptions_crud.strip_jsonb_key(conn, d1, DAY)
+        rows = await conn.fetch("SELECT special_days FROM device_schedules WHERE device_id = $1;", d1)
+    assert touched == 0
+    assert all(set(json.loads(r["special_days"])) == {DAY.isoformat()} for r in rows)

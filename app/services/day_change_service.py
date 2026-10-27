@@ -318,8 +318,15 @@ def _change_from_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def remove_exception(pool: asyncpg.Pool, exception_id: int, editor: Editor) -> None:
-    """Delete one per-date exception and enqueue the "removed" email."""
+async def remove_exception(
+    pool: asyncpg.Pool, exception_id: int, editor: Editor, *, strip_jsonb: bool = False
+) -> None:
+    """Delete one per-date exception and enqueue the "removed" email.
+
+    strip_jsonb also drops the exact-date special_days key in the same
+    transaction whatever the source (DELETE /special-days with the cutover on);
+    a migrated exception always strips it.
+    """
     row = await exceptions_crud.get(pool, exception_id)
     if row is None:
         raise LookupError(f"Excepción {exception_id} no encontrada")
@@ -335,7 +342,7 @@ async def remove_exception(pool: asyncpg.Pool, exception_id: int, editor: Editor
             deleted = await exceptions_crud.delete(conn, exception_id)
             if deleted is None:
                 raise LookupError(f"Excepción {exception_id} no encontrada")
-            if deleted["source"] == "migrated":
+            if strip_jsonb or deleted["source"] == "migrated":
                 await exceptions_crud.strip_jsonb_key(conn, device_id, day)
             tz = (await exceptions_crud.timezones(conn, [device_id])).get(device_id, DEFAULT_TZ)
             after = await exceptions_crud.blocks(conn, [device_id], day, day + timedelta(days=1))

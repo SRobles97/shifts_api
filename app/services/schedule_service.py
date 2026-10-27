@@ -909,11 +909,11 @@ class ScheduleService:
                 if r["shift_type"] == shift_type
             ]
             if found:
-                # one email, from the removal; the JSON key goes silently so the
-                # old entry cannot resurface in readers
-                await day_change_service.remove_exception(pool, found[0]["id"], editor)
-                async with pool.acquire() as conn:
-                    await exceptions_crud.strip_jsonb_key(conn, device_id, day)
+                # one email, from the removal; the JSON key goes in the same
+                # transaction so the old entry cannot resurface in readers
+                await day_change_service.remove_exception(
+                    pool, found[0]["id"], editor, strip_jsonb=True
+                )
                 return ScheduleDeleteResponse(
                     message=f"Día especial {date_str} eliminado para device_id={device_id}"
                 )

@@ -614,3 +614,90 @@ async def test_delete_route_403_end_to_end(pool, env):
 
     assert resp.status_code == 403, resp.text
     assert len(await _exceptions(pool, d1)) == 1
+
+
+# --- DELETE /special-days with the cutover flag on ---------------------------
+
+
+async def _special_keys(pool, device_id):
+    raw = await pool.fetchval(
+        "SELECT special_days FROM device_schedules WHERE device_id = $1;", device_id
+    )
+    return json.loads(raw) if raw else {}
+
+
+async def test_cutover_delete_keeps_recurring_key_at_that_date(pool, env, monkeypatch):
+    from app.core.config import settings
+    from app.services.schedule_service import ScheduleService
+
+    monkeypatch.setattr(settings, "SPECIAL_DAYS_CUTOVER", True)
+    d1, d2 = env["d1"], env["d2"]
+    recurring = {
+        FRIDAY.isoformat(): {
+            "name": "Aniversario", "type": "holiday", "workHours": None,
+            "isRecurring": True, "recurrencePattern": "yearly",
+        }
+    }
+    single = {FRIDAY.isoformat(): {"name": "Sin trabajo", "type": "holiday", "workHours": None}}
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")}, special_days=recurring)
+    await _schedule(pool, d2, {"friday": ("08:00", "17:00")}, special_days=single)
+    await _insert_exception(pool, d1, FRIDAY, "no_work")
+    await _insert_exception(pool, d2, FRIDAY, "no_work")
+
+    for dev in (d1, d2):
+        await ScheduleService.delete_special_day(pool, dev, FRIDAY.isoformat(), "day", EDITOR)
+
+    assert await _exceptions(pool, d1) == []
+    assert await _exceptions(pool, d2) == []
+    # a recurring holiday keyed by its first-year date survives
+    assert set(await _special_keys(pool, d1)) == {FRIDAY.isoformat()}
+    assert await _special_keys(pool, d2) == {}
+
+
+async def test_cutover_delete_strip_rolls_back_with_the_removal(pool, env, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+
+    from app.core.config import settings
+    from app.services import day_change_service
+    from app.services.schedule_service import ScheduleService
+
+    monkeypatch.setattr(settings, "SPECIAL_DAYS_CUTOVER", True)
+    d1 = env["d1"]
+    single = {FRIDAY.isoformat(): {"name": "Sin trabajo", "type": "holiday", "workHours": None}}
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")}, special_days=single)
+    exc_id = await _insert_exception(pool, d1, FRIDAY, "no_work")
+
+    # the outbox insert is the last write of the removal, after the strip
+    with patch.object(
+        day_change_service.notification_outbox_crud,
+        "insert_if_present",
+        AsyncMock(side_effect=RuntimeError("outbox down")),
+    ):
+        with pytest.raises(RuntimeError):
+            await ScheduleService.delete_special_day(pool, d1, FRIDAY.isoformat(), "day", EDITOR)
+
+    assert [r["id"] for r in await _exceptions(pool, d1)] == [exc_id]
+    assert set(await _special_keys(pool, d1)) == {FRIDAY.isoformat()}
+
+
+async def test_cutover_delete_failing_strip_keeps_the_exception(pool, env, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+
+    from app.core.config import settings
+    from app.services.schedule_service import ScheduleService
+
+    monkeypatch.setattr(settings, "SPECIAL_DAYS_CUTOVER", True)
+    d1 = env["d1"]
+    single = {FRIDAY.isoformat(): {"name": "Sin trabajo", "type": "holiday", "workHours": None}}
+    await _schedule(pool, d1, {"friday": ("08:00", "17:00")}, special_days=single)
+    exc_id = await _insert_exception(pool, d1, FRIDAY, "no_work")
+
+    # one transaction: a strip that fails takes the removal and its email with it
+    with patch.object(
+        exceptions_crud, "strip_jsonb_key", AsyncMock(side_effect=RuntimeError("boom"))
+    ):
+        with pytest.raises(RuntimeError):
+            await ScheduleService.delete_special_day(pool, d1, FRIDAY.isoformat(), "day", EDITOR)
+
+    assert [r["id"] for r in await _exceptions(pool, d1)] == [exc_id]
+    assert await _outbox(pool, env["company_id"]) == []

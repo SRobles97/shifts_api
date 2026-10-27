@@ -150,12 +150,18 @@ class ExceptionsCRUD:
 
     @staticmethod
     async def strip_jsonb_key(conn: asyncpg.Connection, device_id: int, day: date) -> int:
-        """Remove the exact-date key from special_days in every schedule row of a device."""
+        """Remove the exact-date key from special_days in every schedule row of a device.
+
+        Device-wide on purpose: readers join special_days on device_id only. A
+        recurring entry keyed by its first-year date is left alone.
+        """
         status = await conn.execute(
             """
             UPDATE device_schedules
             SET special_days = special_days - $2::text
-            WHERE device_id = $1 AND special_days ? $2::text;
+            WHERE device_id = $1
+              AND special_days ? $2::text
+              AND (special_days->$2::text->'isRecurring') IS DISTINCT FROM 'true'::jsonb;
             """,
             device_id,
             day.isoformat(),

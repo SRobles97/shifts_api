@@ -150,8 +150,10 @@ async def test_cutover_on_special_day_delete_removes_exception(client, cutover_o
     assert "2025-12-25" in resp.json()["message"]
     remove.assert_awaited_once()
     assert remove.await_args.args[1] == 7
+    # the strip runs inside the removal's transaction, not as a second write
+    assert remove.await_args.kwargs == {"strip_jsonb": True}
     stub.list.assert_awaited_once_with(mock_pool, [1], date(2025, 12, 25), date(2025, 12, 25))
-    assert stub.strip_jsonb_key.await_args.args == ("conn", 1, date(2025, 12, 25))
+    stub.strip_jsonb_key.assert_not_called()
     legacy.assert_not_called()
 
 
