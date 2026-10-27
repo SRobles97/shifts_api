@@ -605,7 +605,7 @@ async def test_delete_route_403_end_to_end(pool, env):
     app.dependency_overrides[verify_api_key] = lambda: None
     app.dependency_overrides[require_schedule_editor] = lambda: other
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t/shifts-api/v1") as c:
             resp = await c.delete(f"/schedules/exceptions/{exc_id}")
     finally:
         app.dependency_overrides.clear()
