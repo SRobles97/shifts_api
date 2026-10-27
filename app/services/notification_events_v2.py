@@ -3,8 +3,9 @@ Builds v2 `notification_outbox` payloads: one event per operation, N machines.
 
 Pure functions only: no database, no clock, no network. `change`, `devices`,
 `skipped` and `kept_exceptions` arrive already as plain dicts in the shape
-notify_api's v2 renderer reads (snake_case, no aliases); this module only
-assembles the envelope.
+notify_api's v2 renderer reads (snake_case, no aliases); this module
+assembles the envelope and owns the weekday diff (`_diff_days`) callers use
+to fill `devices[].days`.
 """
 
 from datetime import date, datetime, timezone
@@ -14,10 +15,86 @@ from uuid import UUID
 from ..models.notification_event import (
     NOTIFICATION_TYPE_SHIFT_CHANGE,
     Actor,
+    DayHours,
     OutboxEvent,
 )
+from ..models.schedule import Schedule
 
 PAYLOAD_VERSION = 2
+
+_NO_BREAKS = "sin pausas"
+
+# En dash, not a hyphen: this string goes straight into the email body.
+_HOURS_SEPARATOR = "–"
+
+
+# ---------------------------------------------------------------------------
+# Weekday diff of a recurring schedule (also used by the v1 builder)
+# ---------------------------------------------------------------------------
+
+
+def _format_hours(day: DayHours) -> str:
+    return f"{day.start}{_HOURS_SEPARATOR}{day.end}"
+
+
+def _format_breaks(day: DayHours) -> str:
+    if not day.breaks:
+        return _NO_BREAKS
+    return ", ".join(f"{b.start} ({b.duration_minutes} min)" for b in day.breaks)
+
+
+def _ordered_days(*sources: Dict[str, DayHours]) -> List[str]:
+    """Weekday-ordered union of the day keys present in any source.
+
+    Anything unrecognised (there should be nothing) is appended alphabetically
+    rather than dropped, so an odd key still shows up in the email.
+    """
+    seen = {day for source in sources for day in source}
+    known = [d for d in Schedule.VALID_DAYS if d in seen]
+    unknown = sorted(seen - set(Schedule.VALID_DAYS))
+    return known + unknown
+
+
+def _day_entry(name: str, before: Optional[DayHours], after: Optional[DayHours]) -> Optional[Dict[str, Any]]:
+    """One row of the day diff, or None when that day did not change."""
+    hours_before = _format_hours(before) if before else None
+    hours_after = _format_hours(after) if after else None
+    breaks_before = _format_breaks(before) if before else None
+    breaks_after = _format_breaks(after) if after else None
+
+    if hours_before == hours_after and breaks_before == breaks_after:
+        return None
+
+    if before is None:
+        change = "added"
+    elif after is None:
+        change = "removed"
+    else:
+        change = "modified"
+
+    entry: Dict[str, Any] = {
+        "day": name,
+        "before": hours_before,
+        "after": hours_after,
+        "change": change,
+    }
+    # Only carry break detail when it is part of what changed — otherwise the
+    # email repeats the same pause on every row.
+    if change == "modified" and breaks_before != breaks_after:
+        entry["breaks_before"] = breaks_before
+        entry["breaks_after"] = breaks_after
+    return entry
+
+
+def _diff_days(
+    before: Dict[str, DayHours], after: Dict[str, DayHours]
+) -> List[Dict[str, Any]]:
+    entries = []
+    for name in _ordered_days(before, after):
+        entry = _day_entry(name, before.get(name), after.get(name))
+        if entry is not None:
+            entries.append(entry)
+    return entries
 
 
 def _iso_utc(moment: datetime) -> str:

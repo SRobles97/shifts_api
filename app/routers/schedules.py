@@ -17,7 +17,13 @@ from ..core.authz import (
     require_schedule_editor,
 )
 from ..core.dependencies import get_db_pool, verify_api_key
-from ..schemas.day_changes import DayChangeRequest, DayChangeResponse, ExceptionRead
+from ..schemas.day_changes import (
+    BulkScheduleRequest,
+    BulkScheduleResponse,
+    DayChangeRequest,
+    DayChangeResponse,
+    ExceptionRead,
+)
 from ..schemas.schedule import (
     AllScheduleStatsResponse,
     DayScheduleSchema,
@@ -29,7 +35,7 @@ from ..schemas.schedule import (
     SingleScheduleStatsResponse,
     SpecialDaySchema,
 )
-from ..services import day_change_service
+from ..services import bulk_schedule_service, day_change_service
 from ..services.schedule_service import MirroredScheduleError, schedule_service
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -220,6 +226,52 @@ async def remove_exception(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar la excepción: {e}")
+
+
+# ========== Bulk regular schedule ("Editar turno habitual") ==========
+# Static paths: declared before the /{device_id} routes.
+
+
+@router.post("/bulk/preview", response_model=BulkScheduleResponse, responses=RESPONSES_404_400_500)
+async def preview_bulk_schedule(
+    data: BulkScheduleRequest,
+    pool: Pool,
+    _: ApiKey,
+    editor: ScheduleEditor,
+):
+    """Preview a new regular schedule from a date over several machines; nothing is written."""
+    refs = await assert_can_edit_devices(pool, editor, data.device_ids)
+    try:
+        return await bulk_schedule_service.preview_bulk(pool, data, refs)
+    except HTTPException:
+        raise
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al previsualizar el turno habitual: {e}")
+
+
+@router.post("/bulk", response_model=BulkScheduleResponse, responses=RESPONSES_404_400_500)
+async def apply_bulk_schedule(
+    data: BulkScheduleRequest,
+    pool: Pool,
+    _: ApiKey,
+    editor: ScheduleEditor,
+):
+    """Apply a new regular schedule from a date to several machines at once (one email)."""
+    refs = await assert_can_edit_devices(pool, editor, data.device_ids)
+    try:
+        return await bulk_schedule_service.apply_bulk(pool, data, refs, editor.actor())
+    except HTTPException:
+        raise
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al aplicar el turno habitual: {e}")
 
 
 @router.put("/{device_id}", response_model=ScheduleRead, responses=RESPONSES_404_400_500)
