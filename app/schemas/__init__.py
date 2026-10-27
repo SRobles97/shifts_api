@@ -18,6 +18,20 @@ from .schedule import (
     ErrorResponse,
 )
 
+from .day_changes import (
+    HoursSpec,
+    BreakSpec,
+    ChangeSpec,
+    DayChangeRequest,
+    DayChangeDeviceResult,
+    DayChangeResponse,
+    ExceptionRead,
+    BulkScheduleRequest,
+    BulkDeviceResult,
+    BulkScheduleResponse,
+    EffectiveBlock,
+)
+
 __all__ = [
     "WorkHoursSchema",
     "BreakSchema",
@@ -30,4 +44,15 @@ __all__ = [
     "ScheduleRead",
     "ScheduleDeleteResponse",
     "ErrorResponse",
+    "HoursSpec",
+    "BreakSpec",
+    "ChangeSpec",
+    "DayChangeRequest",
+    "DayChangeDeviceResult",
+    "DayChangeResponse",
+    "ExceptionRead",
+    "BulkScheduleRequest",
+    "BulkDeviceResult",
+    "BulkScheduleResponse",
+    "EffectiveBlock",
 ]
