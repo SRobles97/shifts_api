@@ -91,9 +91,13 @@ async def _run(
             )
             continue
 
-        outcome = await bulk_schedules_crud.apply_for_device(
-            conn, device_id, req.shift_type, req.valid_from, day_schedules_json, extra_hours_json
-        )
+        try:
+            outcome = await bulk_schedules_crud.apply_for_device(
+                conn, device_id, req.shift_type, req.valid_from, day_schedules_json, extra_hours_json
+            )
+        except asyncpg.exceptions.ExclusionViolationError as e:
+            # the whole operation rolls back; say which machine blocked it
+            raise ValueError(f"{label}: la vigencia se cruza con otro horario de la máquina") from e
         before = outcome["before_row"]
         before_days = snapshot_from_record(before).day_schedules if before is not None else {}
         before_extras = extras_from_jsonb(before["extra_hours"]) if before is not None else {}

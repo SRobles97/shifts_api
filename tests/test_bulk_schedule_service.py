@@ -90,3 +90,21 @@ async def test_bulk_service_value_error_is_400(client):
 async def test_bulk_invalid_body_is_422(client):
     resp = await client.post("/schedules/bulk", json={**BODY, "deviceIds": []})
     assert resp.status_code == 422
+
+
+async def test_bulk_exclusion_violation_names_the_machine():
+    import asyncpg
+    import pytest
+
+    from app.schemas.day_changes import BulkScheduleRequest
+    from app.services import bulk_schedule_service
+
+    req = BulkScheduleRequest.model_validate(BODY)
+    svc = "app.services.bulk_schedule_service"
+    with patch(f"{svc}.exceptions_crud.mirrored_ids", AsyncMock(return_value=set())), patch(
+        f"{svc}.bulk_schedules_crud.apply_for_device",
+        AsyncMock(side_effect=asyncpg.exceptions.ExclusionViolationError("conflicting key value")),
+    ):
+        with pytest.raises(ValueError) as exc:
+            await bulk_schedule_service._run(AsyncMock(), req, REFS)
+    assert str(exc.value) == "Fresadora 1: la vigencia se cruza con otro horario de la máquina"
