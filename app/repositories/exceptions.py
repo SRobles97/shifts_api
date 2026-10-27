@@ -63,7 +63,10 @@ class ExceptionsCRUD:
     async def get_many(
         conn: asyncpg.Connection, device_ids: List[int], shift_type: str, day: date
     ) -> Dict[int, asyncpg.Record]:
-        """Exception in force per device for one shift and date, row-locked."""
+        """Exception in force per device for one shift and date, row-locked.
+
+        FOR UPDATE: must be called inside a transaction.
+        """
         rows = await conn.fetch(
             """
             SELECT *
@@ -138,8 +141,8 @@ class ExceptionsCRUD:
         status = await conn.execute(
             """
             UPDATE device_schedules
-            SET special_days = special_days - $2
-            WHERE device_id = $1 AND special_days ? $2;
+            SET special_days = special_days - $2::text
+            WHERE device_id = $1 AND special_days ? $2::text;
             """,
             device_id,
             day.isoformat(),

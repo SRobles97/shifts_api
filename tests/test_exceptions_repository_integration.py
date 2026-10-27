@@ -10,6 +10,7 @@ import json
 import os
 import uuid
 from datetime import date
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import pytest
@@ -27,8 +28,6 @@ pytestmark = [
 
 DAY = date(2031, 3, 10)  # a Monday, far from any real data
 
-# schedule_change_log is not counted: the session-wide tripwire would also see
-# the rows other modules leave there (triggers log every device_schedules delete).
 _no_foreign_rows_harmed = make_row_count_tripwire(
     DSN,
     (
@@ -36,6 +35,7 @@ _no_foreign_rows_harmed = make_row_count_tripwire(
         "devices",
         "device_schedules",
         "device_schedule_exceptions",
+        "schedule_change_log",
     ),
 )
 
@@ -138,8 +138,13 @@ async def test_blocks_reflect_upsert_inside_transaction(pool, env):
             await exceptions_crud.upsert(conn, d, "day", DAY, _custom(), uuid.uuid4())
             inside = await exceptions_crud.blocks(conn, [d], DAY, DAY)
             days = await exceptions_crud.days(conn, [d], DAY, DAY)
-            assert len(inside) >= 1
             assert all(r["device_id"] == d for r in inside)
+            tz = ZoneInfo("America/Santiago")
+            spans = sorted((r["block_start"].astimezone(tz), r["block_end"].astimezone(tz)) for r in inside)
+            assert [(a.strftime("%H:%M"), b.strftime("%H:%M")) for a, b in spans] == [
+                ("09:00", "11:00"),
+                ("11:30", "13:00"),
+            ]
             assert [r["shift_date"] for r in days] == [DAY]
     # the pool form works as well, and the committed data is visible
     after = await exceptions_crud.blocks(pool, [d], DAY, DAY)
@@ -215,3 +220,19 @@ async def test_device_refs_one_query(pool, env):
     assert refs[env["d1"]].company_id == env["company_id"]
     assert refs[env["d1"]].label == "Fresadora 1"
     assert refs[env["d2"]].key == "F2"
+
+
+async def test_upsert_extra_hours_then_no_work_resets_extra_fields(pool, env):
+    d = env["d1"]
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await exceptions_crud.upsert(
+                conn, d, "day", DAY,
+                ChangeSpec(kind="extra_hours", minutes=60, position="after"), uuid.uuid4(),
+            )
+        async with conn.transaction():
+            await exceptions_crud.upsert(conn, d, "day", DAY, ChangeSpec(kind="no_work"), uuid.uuid4())
+    rows = await exceptions_crud.list(pool, [d], DAY, DAY)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "no_work"
+    assert rows[0]["extra_minutes"] is None and rows[0]["extra_position"] is None

@@ -65,7 +65,13 @@ async def pool():
 
 
 _no_foreign_rows_harmed = make_row_count_tripwire(
-    DSN, ("companies", "devices", "device_schedules", "notification_outbox")
+    DSN, (
+        "companies",
+        "devices",
+        "device_schedules",
+        "notification_outbox",
+        "schedule_change_log",
+    )
 )
 
 
@@ -103,6 +109,10 @@ async def clean(pool):
             )
             await conn.execute(
                 "DELETE FROM device_schedules WHERE device_id = $1;", device_id
+            )
+            # Triggers log every device_schedules write; the table has no FK.
+            await conn.execute(
+                "DELETE FROM schedule_change_log WHERE device_id = $1;", device_id
             )
             await conn.execute("DELETE FROM devices WHERE id = $1;", device_id)
             await conn.execute("DELETE FROM companies WHERE id = $1;", company_id)
