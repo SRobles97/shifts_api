@@ -187,6 +187,19 @@ async def test_invalid_body_is_422(client):
     assert resp.status_code == 422
 
 
+async def test_day_shift_custom_hours_crossing_midnight_is_422(client):
+    change = {"kind": "custom_hours", "workHours": {"start": "22:00", "end": "06:00"}}
+    with patch.object(
+        authz_module.exceptions_crud, "device_refs", AsyncMock(return_value=REFS)
+    ), patch(f"{SVC}.apply_day_change", new_callable=AsyncMock) as apply_:
+        resp = await client.post(
+            "/schedules/day-changes", json={**BODY, "shiftType": "day", "change": change}
+        )
+    assert resp.status_code == 422
+    assert "for a 'day' shift" in json.dumps(resp.json()["detail"])
+    apply_.assert_not_awaited()
+
+
 # --- list / remove routes ----------------------------------------------------
 
 

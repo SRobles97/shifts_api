@@ -19,6 +19,14 @@ from typing import Any, List, Optional, Dict
 from datetime import date, datetime
 
 
+def day_shift_overnight_message(label: str, start: str, end: str) -> str:
+    """Error for 'day' work hours that cross midnight (shared by every writer)."""
+    return (
+        f"{label}: end time '{end}' must be after start time '{start}' "
+        "for a 'day' shift. Use shiftType='night' for overnight schedules."
+    )
+
+
 class WorkHoursSchema(BaseModel):
     """Schema for work hours in API requests/responses."""
 

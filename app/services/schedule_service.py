@@ -50,6 +50,7 @@ from ..schemas.schedule import (
     SingleScheduleStatsResponse,
     SpecialDaySchema,
     WorkHoursSchema,
+    day_shift_overnight_message,
 )
 
 VALID_DAYS = [
@@ -90,10 +91,7 @@ def _assert_day_shift_within_day(
         if _time_to_minutes(_parse_time_string(wh.end)) <= _time_to_minutes(
             _parse_time_string(wh.start)
         ):
-            raise ValueError(
-                f"{label}: end time '{wh.end}' must be after start time '{wh.start}' "
-                "for a 'day' shift. Use shiftType='night' for overnight schedules."
-            )
+            raise ValueError(day_shift_overnight_message(label, wh.start, wh.end))
 
     if schedule:
         for day, cfg in schedule.items():

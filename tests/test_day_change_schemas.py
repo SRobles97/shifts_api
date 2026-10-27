@@ -9,6 +9,7 @@ from app.schemas.day_changes import (
     DayChangeRequest,
     DayChangeResponse,
 )
+from app.schemas.schedule import day_shift_overnight_message
 
 
 def _custom(**over):
@@ -251,3 +252,41 @@ def test_exception_read_accepts_spec_instances():
     )
     assert row.work_hours.start == "10:00"
     assert row.breaks[0].duration_minutes == 15
+
+
+# --- day shift custom hours may not cross midnight ---------------------------
+
+
+def _day_change(shift_type, start, end):
+    return DayChangeRequest.model_validate({
+        "date": "2026-10-23",
+        "deviceIds": [1],
+        "shiftType": shift_type,
+        "change": {"kind": "custom_hours", "workHours": {"start": start, "end": end}},
+    })
+
+
+def test_day_shift_custom_hours_crossing_midnight_rejected():
+    with pytest.raises(ValidationError) as exc:
+        _day_change("day", "22:00", "06:00")
+    # same wording the schedule writers use for a day shift
+    assert day_shift_overnight_message("workHours", "22:00", "06:00") in str(exc.value)
+
+
+def test_night_shift_custom_hours_may_cross_midnight():
+    req = _day_change("night", "22:00", "06:00")
+    assert req.change.work_hours.end == "06:00"
+
+
+def test_day_shift_custom_hours_within_day_ok():
+    assert _day_change("day", "08:00", "17:00").change.work_hours.start == "08:00"
+
+
+def test_schedule_writers_use_the_same_overnight_message():
+    from app.schemas.schedule import DayScheduleSchema
+    from app.services.schedule_service import _assert_day_shift_within_day
+
+    day = DayScheduleSchema.model_validate({"workHours": {"start": "22:00", "end": "06:00"}})
+    with pytest.raises(ValueError) as exc:
+        _assert_day_shift_within_day("day", {"monday": day}, None)
+    assert str(exc.value) == day_shift_overnight_message("workHours for monday", "22:00", "06:00")

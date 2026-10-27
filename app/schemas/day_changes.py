@@ -15,7 +15,7 @@ from uuid import UUID
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic.config import ConfigDict
 
-from .schedule import DayScheduleSchema, ExtraHourSchema
+from .schedule import DayScheduleSchema, ExtraHourSchema, day_shift_overnight_message
 
 _HHMM = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _DAY_MINUTES = 24 * 60
@@ -163,6 +163,18 @@ class DayChangeRequest(BaseModel):
     change: ChangeSpec
 
     _unique_ids = field_validator("device_ids")(_check_device_ids)
+
+    @model_validator(mode="after")
+    def validate_day_shift_within_day(self) -> "DayChangeRequest":
+        # same rule as the schedule writers: overnight hours belong to 'night'
+        wh = self.change.work_hours
+        if (
+            self.shift_type == "day"
+            and self.change.kind == "custom_hours"
+            and _to_minutes(wh.end) <= _to_minutes(wh.start)
+        ):
+            raise ValueError(day_shift_overnight_message("workHours", wh.start, wh.end))
+        return self
 
     model_config = ConfigDict(populate_by_name=True)
 
