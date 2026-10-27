@@ -164,19 +164,16 @@ def stub_kept_exceptions(request):
     """No per-date exceptions on the machine the event looks at.
 
     The pool is mocked, so the real read cannot answer. Tests about the
-    "se mantienen" list patch the same target with rows. Integration tests
-    run the real query: `exceptions_crud` is one shared object, so patching it
-    here would blind every module that reads through it.
+    "se mantienen" list patch `exceptions_from` on the same mock. Integration tests
+    run the real query. The module binding is patched, not the shared object.
     """
     if request.node.get_closest_marker("integration"):
         yield None
         return
-    with patch(
-        "app.services.schedule_service.exceptions_crud.exceptions_from",
-        new_callable=AsyncMock,
-        return_value=[],
-    ) as stub:
-        yield stub
+    stub = MagicMock()
+    stub.exceptions_from = AsyncMock(return_value=[])
+    with patch("app.services.schedule_service.exceptions_crud", stub):
+        yield stub.exceptions_from
 
 
 @pytest.fixture(autouse=True)

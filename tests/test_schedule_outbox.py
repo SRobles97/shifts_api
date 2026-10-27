@@ -19,6 +19,7 @@ from tests.conftest import make_db_record, make_special_days_json
 CRUD_PATH = "app.services.schedule_service.schedule_crud"
 DEVICE_PATH = "app.services.schedule_service.device_crud.get_device_ref"
 EXC_PATH = "app.services.schedule_service.exceptions_crud.exceptions_from"
+TODAY_PATH = "app.services.schedule_service._today_santiago"
 
 
 def create_data(**overrides) -> ScheduleCreate:
@@ -212,12 +213,31 @@ class TestUpdateEnqueues:
             {"date": date(2026, 10, 6), "shift_type": "night", "kind": "no_work"},
             {"date": date(2027, 1, 4), "shift_type": "day", "kind": "no_work"},
         ]
-        with patch(EXC_PATH, new_callable=AsyncMock, return_value=rows) as exc:
+        with patch(TODAY_PATH, return_value=date(2025, 1, 1)), \
+             patch(EXC_PATH, new_callable=AsyncMock, return_value=rows) as exc:
             event = await run_update(put_data(), existing)
         assert exc.call_args.args[1:] == ([1], date(2025, 1, 1))
         assert event.payload["kept_exceptions"] == [
             {"device_label": "Fresadora 1", "date": "2026-10-05", "summary": "Sin trabajo"}
         ]
+
+
+    @pytest.mark.asyncio
+    async def test_past_exceptions_are_not_listed_for_an_old_open_row(self):
+        existing = make_db_record(days=["monday"], valid_from=date(2025, 1, 1))
+        rows = [
+            {"date": date(2026, 3, 2), "shift_type": "day", "kind": "no_work"},
+            {"date": date(2026, 11, 2), "shift_type": "day", "kind": "no_work"},
+        ]
+
+        async def from_day(conn, ids, day_from):
+            return [r for r in rows if r["date"] >= day_from]
+
+        with patch(TODAY_PATH, return_value=date(2026, 10, 27)), \
+             patch(EXC_PATH, new_callable=AsyncMock, side_effect=from_day):
+            event = await run_update(put_data(), existing)
+        assert [k["date"] for k in event.payload["kept_exceptions"]] == ["2026-11-02"]
+        assert event.payload["valid_from"] == "2025-01-01"
 
 
 # ==================== DELETE ====================

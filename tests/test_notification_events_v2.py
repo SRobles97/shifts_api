@@ -191,3 +191,11 @@ def test_diff_days_extras_only_day_in_clock_order():
             "change": "added",
         }
     ]
+
+
+def test_device_label_falls_back_from_display_name_to_key_to_id():
+    from app.models.notification_event import DeviceRef
+
+    assert DeviceRef(id=7, company_id=1, key="F1", display_name="Fresadora").label == "Fresadora"
+    assert DeviceRef(id=7, company_id=1, key="F1").label == "F1"
+    assert DeviceRef(id=7, company_id=1).label == "#7"

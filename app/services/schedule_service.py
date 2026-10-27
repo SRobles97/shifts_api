@@ -11,6 +11,7 @@ import re
 from datetime import date, datetime, time, timezone
 from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import asyncpg
 from loguru import logger
@@ -412,6 +413,11 @@ async def _assert_not_mirrored(pool: asyncpg.Pool, device_id: int) -> None:
         raise MirroredScheduleError(_MIRRORED_MESSAGE)
 
 
+def _today_santiago() -> date:
+    """Today in the plants' zone; the seam tests patch."""
+    return datetime.now(ZoneInfo("America/Santiago")).date()
+
+
 def _request_extras(extra_hours: Optional[Mapping[str, Any]]) -> Dict[str, Extras]:
     """A request's extraHours as {weekday: [(start, end), ...]}."""
     return {
@@ -469,7 +475,10 @@ async def _recurring_change_event(
     if not days and validity_shortened is None:
         return None
 
-    rows = await exceptions_crud.exceptions_from(pool, [device_id], valid_from)
+    # Past exceptions are not "kept" over anything: list from today on.
+    rows = await exceptions_crud.exceptions_from(
+        pool, [device_id], max(valid_from, _today_santiago())
+    )
     return build_recurring_change_event(
         company_id=device.company_id,
         operation_id=uuid4(),
