@@ -262,3 +262,16 @@ async def test_superuser_any_company_same_company_ok():
 async def test_returns_refs():
     refs = _refs(d1=2, d2=2)
     assert await _batch(refs, _editor((2, "MANAGER")), [1, 2]) == refs
+
+
+async def test_empty_device_list_400():
+    with pytest.raises(authz_module.HTTPException) as e:
+        await _batch({}, _editor(), [])
+    assert e.value.status_code == 400
+    assert e.value.detail == "Debe indicar al menos una máquina"
+
+
+async def test_superuser_mixed_companies_400():
+    with pytest.raises(authz_module.HTTPException) as e:
+        await _batch(_refs(d1=2, d2=3), _editor(superuser=True), [1, 2])
+    assert e.value.status_code == 400

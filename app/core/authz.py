@@ -122,6 +122,8 @@ async def assert_can_edit_devices(
     pool, editor: Editor, device_ids: list[int]
 ) -> dict[int, DeviceRef]:
     """Raise 404/400/403 unless `editor` may change every device, all of one company."""
+    if not device_ids:
+        raise HTTPException(status_code=400, detail="Debe indicar al menos una máquina")
     refs = await exceptions_crud.device_refs(pool, device_ids)
     for device_id in device_ids:
         if device_id not in refs:
