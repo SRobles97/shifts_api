@@ -9,7 +9,7 @@ The router maps these to HTTP status codes.
 import json
 import re
 from datetime import date, datetime, time, timezone
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -436,6 +436,45 @@ async def _assert_not_mirrored(pool: asyncpg.Pool, device_id: int) -> None:
         raise MirroredScheduleError(_MIRRORED_MESSAGE)
 
 
+def _requested_valid_to(
+    data: Union[ScheduleUpdate, SchedulePatch], existing: Dict[str, Any]
+) -> Tuple[bool, Optional[date]]:
+    """(¿vino validTo en el cuerpo?, valid_to resultante).
+
+    `validTo` omitido conserva el término actual; `validTo: null` explícito lo
+    quita y la vigencia queda indefinida (la app lo envía al limpiar "Vigente
+    hasta"). Pydantic no distingue ambos casos por valor, sí por
+    `model_fields_set`.
+    """
+    if "valid_to" in data.model_fields_set:
+        return True, data.valid_to
+    return False, existing.get("valid_to")
+
+
+async def _assert_can_reopen(
+    pool: asyncpg.Pool,
+    existing: Mapping[str, Any],
+    shift_type: str,
+    valid_from: date,
+    valid_to_sent: bool,
+    new_valid_to: Optional[date],
+) -> None:
+    """Dejar la vigencia sin término choca con una vigencia posterior del mismo
+    turno (la restricción de exclusión respondería un 500 crudo): se rechaza con
+    un 400 que dice desde cuándo existe el turno siguiente."""
+    if not valid_to_sent or new_valid_to is not None:
+        return
+    next_from = await schedule_crud.get_next_valid_from(
+        pool, existing["device_id"], shift_type, valid_from, existing["id"],
+    )
+    if next_from is not None:
+        raise ValueError(
+            "No se puede dejar la vigencia sin término: ya existe un turno posterior "
+            f"desde el {next_from.strftime('%d/%m/%Y')}. Ponga como término el día "
+            "anterior o elimine el turno posterior."
+        )
+
+
 def _today_santiago() -> date:
     """Today in the plants' zone; the seam tests patch."""
     return datetime.now(ZoneInfo("America/Santiago")).date()
@@ -664,8 +703,13 @@ class ScheduleService:
             update_data["shift_type"] = data.shift_type
         if data.valid_from is not None:
             update_data["valid_from"] = data.valid_from
-        if data.valid_to is not None:
-            update_data["valid_to"] = data.valid_to
+        valid_to_sent, new_valid_to = _requested_valid_to(data, existing)
+        await _assert_can_reopen(
+            pool, existing, effective_shift_type,
+            data.valid_from or existing["valid_from"], valid_to_sent, new_valid_to,
+        )
+        if valid_to_sent:
+            update_data["valid_to"] = new_valid_to
 
         event = await _recurring_change_event(
             pool,
@@ -675,7 +719,7 @@ class ScheduleService:
             after_days=_days_from_request(data.schedule),
             after_extras=_request_extras(data.extra_hours),
             valid_from=data.valid_from or existing["valid_from"],
-            valid_to=data.valid_to or existing.get("valid_to"),
+            valid_to=new_valid_to,
             actor=actor,
             is_edit=True,
         )
@@ -721,8 +765,13 @@ class ScheduleService:
         if data.valid_from is not None:
             update_data["valid_from"] = data.valid_from
 
-        if data.valid_to is not None:
-            update_data["valid_to"] = data.valid_to
+        valid_to_sent, new_valid_to = _requested_valid_to(data, existing)
+        await _assert_can_reopen(
+            pool, existing, effective_shift_type,
+            data.valid_from or existing["valid_from"], valid_to_sent, new_valid_to,
+        )
+        if valid_to_sent:
+            update_data["valid_to"] = new_valid_to
 
         if data.metadata:
             if data.metadata.version:
@@ -748,7 +797,7 @@ class ScheduleService:
                     else extras_from_jsonb(existing["extra_hours"])
                 ),
                 valid_from=data.valid_from or existing["valid_from"],
-                valid_to=data.valid_to or existing.get("valid_to"),
+                valid_to=new_valid_to,
                 actor=actor,
                 is_edit=True,
             )
@@ -788,10 +837,11 @@ class ScheduleService:
             existing = await schedule_crud.get_by_id(pool, schedule_id)
         else:
             existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
-        if not existing:
+        # The router authorised the path's device only: a `scheduleId` of any
+        # other device (possibly another company's) reads as not found.
+        if not existing or existing["device_id"] != device_id:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
-        # The row's own device, not the path's: `scheduleId` can name any row.
-        await _assert_not_mirrored(pool, existing["device_id"])
+        await _assert_not_mirrored(pool, device_id)
 
         event = await _recurring_change_event(
             pool,

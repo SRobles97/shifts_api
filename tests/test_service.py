@@ -452,8 +452,74 @@ class TestScheduleServiceUpdate:
 
         assert result.device_id == 5
 
+    @staticmethod
+    async def _run_update(body, existing, next_from=None):
+        pool = AsyncMock()
+        data = ScheduleUpdate.model_validate(body)
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.get_next_valid_from", new_callable=AsyncMock, return_value=next_from), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True) as upd, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=existing):
+            await ScheduleService.update_schedule(pool, 5, data)
+        return upd.await_args.args[2]
+
+    @pytest.mark.asyncio
+    async def test_update_explicit_null_valid_to_reopens(self):
+        """'validTo': null explícito deja la vigencia indefinida (quitar "Vigente hasta")."""
+        existing = make_db_record(device_id=5, valid_to=date(2026, 12, 31))
+        update_data = await self._run_update(
+            {"schedule": {"monday": {"workHours": {"start": "08:00", "end": "17:00"}}},
+             "validTo": None},
+            existing,
+        )
+        assert "valid_to" in update_data
+        assert update_data["valid_to"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_reopen_with_a_later_schedule_is_a_clear_400(self):
+        existing = make_db_record(device_id=5, valid_to=date(2026, 12, 31))
+        with pytest.raises(ValueError, match="ya existe un turno posterior desde el 01/01/2027"):
+            await self._run_update(
+                {"schedule": {"monday": {"workHours": {"start": "08:00", "end": "17:00"}}},
+                 "validTo": None},
+                existing,
+                next_from=date(2027, 1, 1),
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_omitted_valid_to_keeps_it(self):
+        existing = make_db_record(device_id=5, valid_to=date(2026, 12, 31))
+        update_data = await self._run_update(
+            {"schedule": {"monday": {"workHours": {"start": "08:00", "end": "17:00"}}}},
+            existing,
+        )
+        assert "valid_to" not in update_data
+
 
 class TestScheduleServicePatch:
+    @pytest.mark.asyncio
+    async def test_patch_explicit_null_valid_to_reopens(self):
+        pool = AsyncMock()
+        data = SchedulePatch.model_validate({"validTo": None})
+        existing = make_db_record(device_id=3, valid_to=date(2026, 12, 31))
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.get_next_valid_from", new_callable=AsyncMock, return_value=None), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True) as upd, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=existing):
+            await ScheduleService.patch_schedule(pool, 3, data)
+        assert upd.await_args.args[2] == {"valid_to": None}
+
+    @pytest.mark.asyncio
+    async def test_patch_without_valid_to_writes_nothing(self):
+        pool = AsyncMock()
+        data = SchedulePatch.model_validate({})
+        existing = make_db_record(device_id=3, valid_to=date(2026, 12, 31))
+        with patch(f"{CRUD_PATH}.get_current_by_device_id", new_callable=AsyncMock, return_value=existing), \
+             patch(f"{CRUD_PATH}.partial_update", new_callable=AsyncMock, return_value=True) as upd, \
+             patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=existing):
+            await ScheduleService.patch_schedule(pool, 3, data)
+        upd.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_patch_not_found(self):
         pool = AsyncMock()
@@ -571,6 +637,18 @@ class TestScheduleServiceDelete:
              patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock, return_value=True):
             result = await ScheduleService.delete_schedule(pool, 1, schedule_id=42)
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_delete_by_schedule_id_of_another_device_is_not_found(self):
+        # The router authorised the path's device; a scheduleId of any other
+        # device (possibly another company's) must not be deleted.
+        pool = AsyncMock()
+        row = make_db_record(id=42, device_id=77)
+        with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=row), \
+             patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock) as write:
+            with pytest.raises(LookupError):
+                await ScheduleService.delete_schedule(pool, 1, schedule_id=42)
+        write.assert_not_called()
 
 
 class TestScheduleServiceSpecialDays:

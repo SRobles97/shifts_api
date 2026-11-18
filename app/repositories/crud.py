@@ -332,6 +332,24 @@ class ScheduleCRUD:
             )
 
     @staticmethod
+    async def get_next_valid_from(
+        pool: asyncpg.Pool, device_id: int, shift_type: str, after: date, exclude_id: int,
+    ) -> Optional[date]:
+        """valid_from de la primera vigencia del mismo turno que empieza después de
+        `after` (sin contar `exclude_id`), o None."""
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                SELECT MIN(valid_from) FROM device_schedules
+                WHERE device_id = $1 AND shift_type = $2 AND valid_from > $3 AND id <> $4;
+                """,
+                device_id,
+                shift_type,
+                after,
+                exclude_id,
+            )
+
+    @staticmethod
     async def get_all_by_device_id_and_date(
         pool: asyncpg.Pool, device_id: int, target_date: date,
     ) -> List[asyncpg.Record]:
