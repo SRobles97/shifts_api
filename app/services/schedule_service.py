@@ -837,10 +837,11 @@ class ScheduleService:
             existing = await schedule_crud.get_by_id(pool, schedule_id)
         else:
             existing = await schedule_crud.get_current_by_device_id(pool, device_id, shift_type)
-        if not existing:
+        # The router authorised the path's device only: a `scheduleId` of any
+        # other device (possibly another company's) reads as not found.
+        if not existing or existing["device_id"] != device_id:
             raise LookupError(f"Schedule for device_id={device_id} shift_type={shift_type} not found")
-        # The row's own device, not the path's: `scheduleId` can name any row.
-        await _assert_not_mirrored(pool, existing["device_id"])
+        await _assert_not_mirrored(pool, device_id)
 
         event = await _recurring_change_event(
             pool,

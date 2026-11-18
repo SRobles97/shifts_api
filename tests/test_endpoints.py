@@ -595,16 +595,24 @@ class TestMirroredScheduleIsReadOnly:
         write.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_delete_by_schedule_id_checks_the_rows_own_device(self, client, mirrored):
+    async def test_delete_by_schedule_id_of_another_device_is_404(self, client, mirrored):
         # The path says device 1, but scheduleId points at device 77's row: the
-        # guard must judge the row being deleted, not the URL.
+        # caller was authorised for device 1 only, so the row reads as missing.
         row = make_db_record(id=42, device_id=77)
+        with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=row), \
+             patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock) as write:
+            resp = await client.delete("/1?scheduleId=42")
+        assert resp.status_code == 404
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_by_schedule_id_refused_on_a_pilot(self, client, mirrored):
+        row = make_db_record(id=42, device_id=1)
         with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=row), \
              patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock) as write:
             resp = await client.delete("/1?scheduleId=42")
         self.assert_refused(resp)
         write.assert_not_called()
-        mirrored.assert_awaited_with(ANY, 77)
 
     @pytest.mark.asyncio
     async def test_add_special_day_refused(self, client, mirrored, sample_record):

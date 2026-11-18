@@ -638,6 +638,18 @@ class TestScheduleServiceDelete:
             result = await ScheduleService.delete_schedule(pool, 1, schedule_id=42)
         assert result is True
 
+    @pytest.mark.asyncio
+    async def test_delete_by_schedule_id_of_another_device_is_not_found(self):
+        # The router authorised the path's device; a scheduleId of any other
+        # device (possibly another company's) must not be deleted.
+        pool = AsyncMock()
+        row = make_db_record(id=42, device_id=77)
+        with patch(f"{CRUD_PATH}.get_by_id", new_callable=AsyncMock, return_value=row), \
+             patch(f"{CRUD_PATH}.delete_by_id", new_callable=AsyncMock) as write:
+            with pytest.raises(LookupError):
+                await ScheduleService.delete_schedule(pool, 1, schedule_id=42)
+        write.assert_not_called()
+
 
 class TestScheduleServiceSpecialDays:
     @pytest.mark.asyncio
